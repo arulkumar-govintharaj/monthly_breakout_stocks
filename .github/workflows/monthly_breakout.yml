@@ -1,9 +1,8 @@
 name: Monthly Breakout Screener
-
 on:
   schedule:
     # 17:00 IST = 11:30 UTC, Monday-Friday
-    - cron: "30 11 * * 1-5"
+    - cron: "27 11 * * 1-5"
   workflow_dispatch:
     inputs:
       symbols:
@@ -15,11 +14,16 @@ on:
         required: false
         default: "false"
 
+permissions:
+  contents: write   # needed to commit state/breakout_state.csv back to the repo
+
 jobs:
   screen:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -35,7 +39,7 @@ jobs:
           EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
         run: |
-          ARGS="--out output"
+          ARGS="--out output --state-file state/breakout_state.csv"
           if [ -n "${{ github.event.inputs.symbols }}" ]; then
             ARGS="$ARGS --symbols ${{ github.event.inputs.symbols }}"
           fi
@@ -50,3 +54,16 @@ jobs:
           name: monthly-breakout-screener-result
           path: output/*.xlsx
           retention-days: 30
+
+      - name: Commit updated breakout state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add state/breakout_state.csv
+          if git diff --cached --quiet; then
+            echo "No change in breakout state — nothing to commit."
+          else
+            git commit -m "Update breakout state $(date -u +%F)"
+            git pull --rebase origin "${GITHUB_REF_NAME}"
+            git push
+          fi
