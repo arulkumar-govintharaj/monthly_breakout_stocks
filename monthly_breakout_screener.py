@@ -7,17 +7,34 @@ the PREVIOUS CALENDAR MONTH's HIGH and/or LOW during the current
 session — output as a single Excel file, with an optional email
 (stock names in the body, spreadsheet attached).
 
+STATE / NEW-BREAKOUT TRACKING
+------------------------------
+Each run writes the current set of breakout symbols to a small CSV
+state file (default: state/breakout_state.csv). On the NEXT run, the
+script loads that file and compares it to today's breakouts:
+
+  - If no state file exists yet (first run, or it wasn't committed),
+    the email lists ALL current breakouts and the CSV is attached.
+  - If a state file exists, the email lists ONLY the symbols that are
+    breaking out today but were NOT in the previous state (i.e. new
+    breakouts since the last run).
+
+The state file is meant to be committed back to the repo by the
+GitHub Actions workflow after each run so the next run can diff
+against it.
+
 Usage:
     python monthly_breakout_screener.py
     python monthly_breakout_screener.py --symbols RELIANCE,SBIN,SONACOMS
     python monthly_breakout_screener.py --no-email
     python monthly_breakout_screener.py --only-breakouts
+    python monthly_breakout_screener.py --state-file state/breakout_state.csv
 
 Email is sent via Gmail SMTP using credentials from environment
 variables (see README for GitHub Actions secrets setup):
-    EMAIL_USERNAME   - sender Gmail address
+    EMAIL_USERNAME     - sender Gmail address
     EMAIL_APP_PASSWORD - Gmail App Password (not your normal password)
-    EMAIL_TO         - comma-separated recipient address(es)
+    EMAIL_TO           - comma-separated recipient address(es)
 """
 
 import argparse
@@ -172,7 +189,51 @@ def load_universe(universe_arg, symbols_arg):
     return DEFAULT_FNO_UNIVERSE
 
 
-def send_email(df: pd.DataFrame, excel_path: Path):
+def load_previous_breakouts(state_path: Path):
+    """
+    Returns (prev_high_set, prev_low_set, state_existed).
+    An empty/missing file means no previous state (first run).
+    """
+    if not state_path.exists():
+        return set(), set(), False
+
+    try:
+        prev_df = pd.read_csv(state_path)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[WARN] Could not read state file {state_path}: {exc}", file=sys.stderr)
+        return set(), set(), False
+
+    if prev_df.empty:
+        return set(), set(), True
+
+    prev_high = set(prev_df.loc[prev_df["Broke_Month_High"] == "YES", "Symbol"])
+    prev_low = set(prev_df.loc[prev_df["Broke_Month_Low"] == "YES", "Symbol"])
+    return prev_high, prev_low, True
+
+
+def save_state(full_df: pd.DataFrame, state_path: Path):
+    """Persists today's breakout rows (only) as the new state file."""
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    breakout_df = full_df[
+        (full_df["Broke_Month_High"] == "YES") | (full_df["Broke_Month_Low"] == "YES")
+    ].copy()
+    breakout_df.to_csv(state_path, index=False)
+    print(f"[INFO] State saved to {state_path.resolve()} ({len(breakout_df)} rows)")
+
+
+def format_symbol_list(symbols):
+    return ", ".join(sorted(symbols)) if symbols else "None"
+
+
+def send_email(
+    current_high,
+    current_low,
+    new_high,
+    new_low,
+    is_first_run: bool,
+    excel_path: Path,
+    state_path: Path,
+):
     """Sends the screener result via Gmail SMTP. No-op (with a warning)
     if the required environment variables aren't set."""
     user = os.environ.get("EMAIL_USERNAME")
@@ -187,30 +248,50 @@ def send_email(df: pd.DataFrame, excel_path: Path):
         )
         return
 
-    high_breaks = df[df["Broke_Month_High"] == "YES"]["Symbol"].tolist()
-    low_breaks = df[df["Broke_Month_Low"] == "YES"]["Symbol"].tolist()
     today_str = dt.datetime.now().strftime("%d-%b-%Y")
-
     lines = [f"NSE F&O Monthly High/Low Breakout Screener — {today_str}", ""]
-    lines.append(f"Broke Previous Month HIGH ({len(high_breaks)}):")
-    lines.append(", ".join(high_breaks) if high_breaks else "  None")
+
+    if is_first_run:
+        lines.append(
+            "No previous state file found — this is a baseline run. "
+            "Showing ALL current breakouts."
+        )
+        lines.append("")
+        lines.append(f"Broke Previous Month HIGH ({len(current_high)}):")
+        lines.append(format_symbol_list(current_high))
+        lines.append("")
+        lines.append(f"Broke Previous Month LOW ({len(current_low)}):")
+        lines.append(format_symbol_list(current_low))
+        subject_suffix = "Baseline"
+    else:
+        lines.append(
+            "Comparing against the last committed state — showing only "
+            "NEW breakouts since the last run."
+        )
+        lines.append("")
+        lines.append(f"NEW breakouts above previous month HIGH ({len(new_high)}):")
+        lines.append(format_symbol_list(new_high))
+        lines.append("")
+        lines.append(f"NEW breakouts below previous month LOW ({len(new_low)}):")
+        lines.append(format_symbol_list(new_low))
+        subject_suffix = "New Breakouts"
+
     lines.append("")
-    lines.append(f"Broke Previous Month LOW ({len(low_breaks)}):")
-    lines.append(", ".join(low_breaks) if low_breaks else "  None")
-    lines.append("")
-    lines.append("Full spreadsheet attached.")
+    lines.append("Full spreadsheet and current breakout-state CSV attached.")
     body = "\n".join(lines)
 
     msg = MIMEMultipart()
     msg["From"] = user
     msg["To"] = recipients
-    msg["Subject"] = f"NSE Monthly Breakout Screener — {today_str}"
+    msg["Subject"] = f"NSE Monthly Breakout Screener ({subject_suffix}) — {today_str}"
     msg.attach(MIMEText(body, "plain"))
 
-    with open(excel_path, "rb") as f:
-        part = MIMEApplication(f.read(), Name=excel_path.name)
-    part["Content-Disposition"] = f'attachment; filename="{excel_path.name}"'
-    msg.attach(part)
+    for attach_path in (excel_path, state_path):
+        if attach_path and Path(attach_path).exists():
+            with open(attach_path, "rb") as f:
+                part = MIMEApplication(f.read(), Name=Path(attach_path).name)
+            part["Content-Disposition"] = f'attachment; filename="{Path(attach_path).name}"'
+            msg.attach(part)
 
     with smtplib.SMTP("smtp.gmail.com", 587) as server:
         server.starttls()
@@ -235,9 +316,14 @@ def main():
     )
     parser.add_argument("--out", default="output", help="Output directory (default: ./output)")
     parser.add_argument(
+        "--state-file", default="state/breakout_state.csv",
+        help="Path to the committed state CSV used to detect new breakouts "
+             "(default: state/breakout_state.csv)",
+    )
+    parser.add_argument(
         "--only-breakouts", action="store_true",
         help="Only include rows where the month's high and/or low was broken "
-             "(in the spreadsheet too, not just the email summary).",
+             "in the SPREADSHEET output (email content logic is unaffected).",
     )
     parser.add_argument(
         "--no-email", action="store_true",
@@ -248,31 +334,48 @@ def main():
     symbols = load_universe(args.universe, args.symbols)
     print(f"Scanning {len(symbols)} symbols for previous-month high/low breakouts...\n")
 
-    df = build_screener_table(symbols)
-    if df.empty:
+    full_df = build_screener_table(symbols)
+    if full_df.empty:
         print("No data could be fetched for any symbol.", file=sys.stderr)
         sys.exit(1)
 
+    state_path = Path(args.state_file)
+    prev_high, prev_low, had_state = load_previous_breakouts(state_path)
+
+    current_high = set(full_df.loc[full_df["Broke_Month_High"] == "YES", "Symbol"])
+    current_low = set(full_df.loc[full_df["Broke_Month_Low"] == "YES", "Symbol"])
+    new_high = current_high - prev_high
+    new_low = current_low - prev_low
+    is_first_run = not had_state
+
+    # Spreadsheet output (unaffected by state logic, kept as before)
+    output_df = full_df
     if args.only_breakouts:
-        df = df[
-            (df["Broke_Month_High"] == "YES") | (df["Broke_Month_Low"] == "YES")
+        output_df = full_df[
+            (full_df["Broke_Month_High"] == "YES") | (full_df["Broke_Month_Low"] == "YES")
         ].reset_index(drop=True)
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M")
     out_path = out_dir / f"monthly_breakout_screener_{timestamp}.xlsx"
-    df.to_excel(out_path, index=False, sheet_name="Monthly_Breakout_Screener")
+    output_df.to_excel(out_path, index=False, sheet_name="Monthly_Breakout_Screener")
 
-    n_high = (df["Broke_Month_High"] == "YES").sum()
-    n_low = (df["Broke_Month_Low"] == "YES").sum()
-    print(f"\nDone. {len(df)} symbols in output.")
-    print(f"  Broke Previous-Month High : {n_high}")
-    print(f"  Broke Previous-Month Low  : {n_low}")
-    print(f"Saved to: {out_path.resolve()}")
+    print(f"\nDone. {len(output_df)} symbols in spreadsheet output.")
+    print(f"  Total breaking Previous-Month High today : {len(current_high)}")
+    print(f"  Total breaking Previous-Month Low today  : {len(current_low)}")
+    print(f"  NEW High breakouts vs last state         : {len(new_high)}")
+    print(f"  NEW Low breakouts vs last state          : {len(new_low)}")
+    print(f"Saved spreadsheet to: {out_path.resolve()}")
+
+    # Update state file for next run (always overwrite with today's breakouts)
+    save_state(full_df, state_path)
 
     if not args.no_email:
-        send_email(df, out_path)
+        send_email(
+            current_high, current_low, new_high, new_low,
+            is_first_run, out_path, state_path,
+        )
 
 
 if __name__ == "__main__":
