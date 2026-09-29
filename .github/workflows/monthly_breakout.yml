@@ -1,8 +1,6 @@
 name: Monthly Breakout Screener
 on:
-  schedule:
-    # 17:00 IST = 11:30 UTC, Monday-Friday
-    - cron: "27 11 * * 1-5"
+  # Triggered externally via cron-job.org at 16:57 IST, Mon-Fri
   workflow_dispatch:
     inputs:
       symbols:
