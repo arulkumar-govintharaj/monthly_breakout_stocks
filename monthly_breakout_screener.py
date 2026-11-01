@@ -117,76 +117,160 @@ def _cache_age_days(cache_path: Path):
         return None
 
 
-def load_nifty500(cache_path: Path, override_path: str = None,
-                  max_age_days: int = 30) -> pd.DataFrame:
-    """
-    Returns a DataFrame with columns Symbol, Company, Industry for the
-    NIFTY 500. Order of preference:
-      1. --nifty500-file override (if given)
-      2. Cached list in the repo at `cache_path`, if it was downloaded
-         less than `max_age_days` ago (no network call)
-      3. Fresh download from NSE (saved to `cache_path` + date stamp)
-      4. Stale cached copy, if the download fails
-    Returns an empty DataFrame if none of these work.
-    """
-    def _normalise(df: pd.DataFrame) -> pd.DataFrame:
-        df.columns = [c.strip() for c in df.columns]
-        if "Symbol" not in df.columns:
-            df = df.rename(columns={df.columns[0]: "Symbol"})
-        out = pd.DataFrame({"Symbol": df["Symbol"].astype(str).str.strip().str.upper()})
-        out["Company"] = df["Company Name"].astype(str).str.strip() if "Company Name" in df else ""
-        out["Industry"] = df["Industry"].astype(str).str.strip() if "Industry" in df else ""
-        return out[out["Symbol"].ne("") & out["Symbol"].ne("NAN")].drop_duplicates("Symbol")
+_HTTP_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "Accept": "text/csv,*/*",
+}
 
-    if override_path:
-        p = Path(override_path)
-        if not p.exists():
-            print(f"[ERROR] NIFTY 500 file not found: {p}", file=sys.stderr)
-            sys.exit(1)
-        return _normalise(pd.read_csv(p))
 
+def load_cached_list(name, cache_path: Path, urls, parse, max_age_days: int = 30):
+    """
+    Generic "keep it in the repo, refresh it every N days" loader.
+    `parse(text) -> DataFrame` must raise if the text isn't the real list.
+    Order of preference:
+      1. Repo copy at `cache_path`, if downloaded < `max_age_days` ago
+      2. Fresh download from `urls` (raw text saved to `cache_path` + date stamp)
+      3. Stale repo copy, if every download fails
+    Returns None if none of these work.
+    """
     age = _cache_age_days(cache_path)
     if cache_path.exists() and age is not None and age < max_age_days:
-        print(f"[INFO] Using NIFTY 500 list from repo ({cache_path}, {age} days old; "
-              f"refreshes after {max_age_days} days)")
-        return _normalise(pd.read_csv(cache_path))
+        try:
+            df = parse(cache_path.read_text(encoding="utf-8"))
+            print(f"[INFO] Using {name} from repo ({cache_path}, {age} days old; "
+                  f"refreshes after {max_age_days} days)")
+            return df
+        except Exception as exc:  # noqa: BLE001
+            print(f"[WARN] Repo copy of {name} unreadable ({exc}) — re-downloading",
+                  file=sys.stderr)
     if not cache_path.exists():
         reason = "not in repo yet"
     elif age is None:
         reason = "has no download-date stamp"
     else:
         reason = f"is {age} days old"
-    print(f"[INFO] NIFTY 500 list {reason} — downloading fresh copy from NSE")
+    print(f"[INFO] {name} {reason} — downloading fresh copy from NSE")
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                      "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-        "Accept": "text/csv,*/*",
-    }
-    for url in NIFTY500_URLS:
+    for url in urls:
         try:
-            req = urllib.request.Request(url, headers=headers)
+            req = urllib.request.Request(url, headers=_HTTP_HEADERS)
             with urllib.request.urlopen(req, timeout=30) as resp:
                 text = resp.read().decode("utf-8", errors="replace")
-            df = pd.read_csv(io.StringIO(text))
-            if len(df) < NIFTY500_MIN_ROWS or "Symbol" not in [c.strip() for c in df.columns]:
-                raise ValueError(f"unexpected content ({len(df)} rows)")
+            df = parse(text)
             cache_path.parent.mkdir(parents=True, exist_ok=True)
-            df.to_csv(cache_path, index=False)
+            cache_path.write_text(text, encoding="utf-8")
             _cache_stamp_path(cache_path).write_text(dt.date.today().isoformat() + "\n")
-            print(f"[INFO] NIFTY 500 list downloaded from {url} ({len(df)} symbols), "
-                  f"saved to {cache_path}")
-            return _normalise(df)
+            print(f"[INFO] {name} downloaded from {url} ({len(df)} symbols), saved to {cache_path}")
+            return df
         except Exception as exc:  # noqa: BLE001
-            print(f"[WARN] Could not download NIFTY 500 list from {url}: {exc}", file=sys.stderr)
+            print(f"[WARN] Could not download {name} from {url}: {exc}", file=sys.stderr)
 
     if cache_path.exists():
-        print(f"[WARN] Download failed — using existing (stale) list at {cache_path}",
-              file=sys.stderr)
-        return _normalise(pd.read_csv(cache_path))
+        try:
+            df = parse(cache_path.read_text(encoding="utf-8"))
+            print(f"[WARN] Download failed — using existing (stale) {name} at {cache_path}",
+                  file=sys.stderr)
+            return df
+        except Exception as exc:  # noqa: BLE001
+            print(f"[WARN] Stale {name} unreadable too: {exc}", file=sys.stderr)
+    return None
 
-    print("[WARN] No NIFTY 500 list available — 52-week-low scan skipped.", file=sys.stderr)
-    return pd.DataFrame(columns=["Symbol", "Company", "Industry"])
+
+def _parse_nifty500(text: str) -> pd.DataFrame:
+    df = pd.read_csv(io.StringIO(text))
+    df.columns = [str(c).strip() for c in df.columns]
+    if "Symbol" not in df.columns:
+        df = df.rename(columns={df.columns[0]: "Symbol"})
+    out = pd.DataFrame({"Symbol": df["Symbol"].astype(str).str.strip().str.upper()})
+    out["Company"] = df["Company Name"].astype(str).str.strip() if "Company Name" in df else ""
+    out["Industry"] = df["Industry"].astype(str).str.strip() if "Industry" in df else ""
+    out = out[out["Symbol"].ne("") & out["Symbol"].ne("NAN")].drop_duplicates("Symbol")
+    return out.reset_index(drop=True)
+
+
+def load_nifty500(cache_path: Path, override_path: str = None,
+                  max_age_days: int = 30) -> pd.DataFrame:
+    """
+    Returns a DataFrame with columns Symbol, Company, Industry for the
+    NIFTY 500 — from the --nifty500-file override if given, otherwise the
+    repo copy (refreshed from NSE every `max_age_days`). Empty if unavailable.
+    """
+    if override_path:
+        p = Path(override_path)
+        if not p.exists():
+            print(f"[ERROR] NIFTY 500 file not found: {p}", file=sys.stderr)
+            sys.exit(1)
+        return _parse_nifty500(p.read_text(encoding="utf-8"))
+
+    def parse(text):
+        df = _parse_nifty500(text)
+        if len(df) < NIFTY500_MIN_ROWS:
+            raise ValueError(f"unexpected content ({len(df)} rows)")
+        return df
+
+    df = load_cached_list("NIFTY 500 list", cache_path, NIFTY500_URLS, parse, max_age_days)
+    if df is None:
+        print("[WARN] No NIFTY 500 list available — 52-week-low scan skipped.", file=sys.stderr)
+        return pd.DataFrame(columns=["Symbol", "Company", "Industry"])
+    return df
+
+
+# --------------------------------------------------------------------------
+# Official NSE F&O stock list (with lot sizes) — decides which 52W-low
+# stocks go in the "has futures" table.
+# --------------------------------------------------------------------------
+FNO_LOTS_URLS = [
+    "https://archives.nseindia.com/content/fo/fo_mktlots.csv",
+    "https://nsearchives.nseindia.com/content/fo/fo_mktlots.csv",
+]
+FNO_MIN_ROWS = 100
+_INDEX_UNDERLYINGS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50"}
+
+
+def _parse_fno_lots(text: str) -> pd.DataFrame:
+    """
+    Parses NSE's fo_mktlots.csv (UNDERLYING, SYMBOL, <month columns>...;
+    padded with spaces, index rows first). Returns Symbol, Lot_Size.
+    """
+    df = pd.read_csv(io.StringIO(text), dtype=str, skipinitialspace=True)
+    df.columns = [str(c).strip() for c in df.columns]
+    sym_col = next((c for c in df.columns if c.upper() == "SYMBOL"), None)
+    if sym_col is None:
+        raise ValueError("no SYMBOL column")
+    month_cols = df.columns[df.columns.get_loc(sym_col) + 1:]
+
+    def first_lot(row):
+        for c in month_cols:
+            v = str(row[c]).strip().replace(",", "")
+            if v.isdigit():
+                return int(v)
+        return None
+
+    out = pd.DataFrame({
+        "Symbol": df[sym_col].astype(str).str.strip().str.upper(),
+        "Lot_Size": df.apply(first_lot, axis=1),
+    })
+    out = out[out["Symbol"].str.match(r"^[A-Z0-9&\-]+$") & ~out["Symbol"].isin(_INDEX_UNDERLYINGS)
+              & out["Symbol"].ne("SYMBOL")]
+    out = out.drop_duplicates("Symbol").reset_index(drop=True)
+    if len(out) < FNO_MIN_ROWS:
+        raise ValueError(f"unexpected content ({len(out)} stocks)")
+    return out
+
+
+def load_fno_lots(cache_path: Path, max_age_days: int = 30) -> dict:
+    """
+    Returns {symbol: lot_size_or_None} for every stock in NSE's F&O segment.
+    Falls back to the built-in DEFAULT_FNO_UNIVERSE (no lot sizes) if the
+    official list can't be loaded.
+    """
+    df = load_cached_list("NSE F&O list", cache_path, FNO_LOTS_URLS, _parse_fno_lots, max_age_days)
+    if df is None:
+        print("[WARN] Official F&O list unavailable — using built-in F&O list for tagging.",
+              file=sys.stderr)
+        return {s: None for s in DEFAULT_FNO_UNIVERSE}
+    return {s: (int(l) if pd.notna(l) else None) for s, l in zip(df["Symbol"], df["Lot_Size"])}
 
 
 def _extract_ticker_frame(data: pd.DataFrame, ticker: str) -> pd.DataFrame:
@@ -246,10 +330,11 @@ def scan_52w_lows(universe: pd.DataFrame, fno_symbols, chunk_size: int = 100) ->
     Batch-downloads ~13 months of daily data for every symbol in
     `universe` and returns ONLY the rows that made a fresh 52-week low in
     the latest session, sorted deepest break first.
+    `fno_symbols` is a {symbol: lot_size} dict (or any iterable of symbols).
     """
     meta = universe.set_index("Symbol")
     symbols = list(meta.index)
-    fno = set(fno_symbols)
+    fno = fno_symbols if isinstance(fno_symbols, dict) else {s: None for s in fno_symbols}
     rows = []
 
     for start in range(0, len(symbols), chunk_size):
@@ -278,6 +363,7 @@ def scan_52w_lows(universe: pd.DataFrame, fno_symbols, chunk_size: int = 100) ->
                 "Company": meta.at[sym, "Company"],
                 "Industry": meta.at[sym, "Industry"],
                 "In_FnO": "YES" if sym in fno else "",
+                "Lot_Size": fno.get(sym),
                 **result,
             })
         time.sleep(1)  # be polite between batches
@@ -479,20 +565,262 @@ def format_52w_section(lows_df, new_52w, status_note=None):
     if not count:
         lines.append("None today.")
         return lines
-    lines.append("[NEW] = not on the list at the previous run, [F&O] = in F&O segment")
-    lines.append("")
-    for _, r in lows_df.iterrows():
-        tags = " ".join(t for t, on in (("[NEW]", r["Symbol"] in new_52w),
-                                         ("[F&O]", r["In_FnO"] == "YES")) if on)
-        lines.append(
-            f"{r['Symbol']:<12} {tags}".rstrip()
-            + f"\n    LTP {r['LTP']:,.2f} | Low {r['Today_Low']:,.2f} vs prev 52W low "
-              f"{r['Prev_52W_Low']:,.2f} on {r['Prev_52W_Low_Date']} "
-              f"({r['%_Low_vs_Prev_52W_Low']:+.2f}%) | "
-              f"{r['%_LTP_From_52W_High']:+.1f}% from 52W high"
-            + (" | closed below" if r["Closed_Below_Prev_52W_Low"] == "YES" else "")
-        )
+    lines.append("[NEW] = not on the list at the previous run")
+    fno_lows, cash_lows = split_52w_by_fno(lows_df)
+    for title, part in (("F&O STOCKS (futures available)", fno_lows),
+                        ("NON-F&O STOCKS (cash only)", cash_lows)):
+        lines += ["", f"-- {title} ({len(part)}) --"]
+        if part.empty:
+            lines.append("None")
+        for _, r in part.iterrows():
+            lot = r.get("Lot_Size")
+            lot_txt = f" | lot {int(lot)}" if lot is not None and pd.notna(lot) else ""
+            lines.append(
+                f"{r['Symbol']:<12} {'[NEW]' if r['Symbol'] in new_52w else ''}".rstrip()
+                + f"\n    LTP {r['LTP']:,.2f}{lot_txt} | Low {r['Today_Low']:,.2f} vs prev 52W "
+                  f"low {r['Prev_52W_Low']:,.2f} on {r['Prev_52W_Low_Date']} "
+                  f"({r['%_Low_vs_Prev_52W_Low']:+.2f}%) | "
+                  f"{r['%_LTP_From_52W_High']:+.1f}% from 52W high"
+                + (" | closed below" if r["Closed_Below_Prev_52W_Low"] == "YES" else "")
+            )
     return lines
+
+
+# --------------------------------------------------------------------------
+# HTML email (inline styles only — Gmail ignores most <style> blocks).
+# Table cells use HTML attributes (align/nowrap/bgcolor) instead of
+# per-cell inline CSS to keep the email under Gmail's ~102 KB clip limit.
+# --------------------------------------------------------------------------
+_C = {
+    "ink": "#111827", "muted": "#6b7280", "line": "#e5e7eb", "zebra": "#f3f4f6",
+    "head": "#1f2937", "green": "#15803d", "green_bg": "#dcfce7",
+    "red": "#b91c1c", "red_bg": "#fee2e2", "amber": "#92400e", "amber_bg": "#fef3c7",
+    "blue": "#1e40af", "blue_bg": "#dbeafe",
+}
+_FONT = "font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;"
+_TH = f"background:{_C['head']};color:#fff;font-size:12px;font-weight:600"
+MAX_EMAIL_ROWS = 60  # per table; the rest are in the attached spreadsheet
+
+
+def _esc(v):
+    import html
+    return html.escape("" if v is None or (isinstance(v, float) and pd.isna(v)) else str(v))
+
+
+def _num(v, dp=2):
+    try:
+        return f"{float(v):,.{dp}f}"
+    except (TypeError, ValueError):
+        return _esc(v)
+
+
+def _pct(v, colour=True):
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return _esc(v)
+    c = _C["green"] if f > 0 else _C["red"] if f < 0 else _C["muted"]
+    return f'<b style="color:{c if colour else _C["ink"]}">{f:+.2f}%</b>'
+
+
+def _badge(text, fg, bg):
+    return (f' <b style="padding:1px 5px;border-radius:3px;background:{bg};color:{fg};'
+            f'font-size:10px">{text}</b>')
+
+
+def _sub(text):
+    """Small grey second line inside a cell."""
+    return f'<br><small style="color:{_C["muted"]}">{text}</small>'
+
+
+def _stat(label, value, fg, bg):
+    return (f'<div style="display:inline-block;vertical-align:top;background:{bg};border-radius:8px;'
+            f'padding:10px 14px;margin:0 6px 6px 0;min-width:100px">'
+            f'<div style="font-size:22px;font-weight:700;color:{fg}">{value}</div>'
+            f'<div style="font-size:11px;color:{fg};text-transform:uppercase;letter-spacing:.4px">'
+            f'{label}</div></div>')
+
+
+def _section_title(text, count, fg):
+    return (f'<h2 style="margin:28px 0 8px;font-size:16px;color:{_C["ink"]}">'
+            f'<span style="display:inline-block;width:4px;height:16px;background:{fg};'
+            f'vertical-align:-2px;margin-right:8px;border-radius:2px"></span>{_esc(text)} '
+            f'<span style="color:{_C["muted"]};font-weight:400">({count})</span></h2>')
+
+
+def _table(headers, rows, total=None):
+    """headers: list of (label, align); rows: list of lists of HTML cell strings.
+    Shows at most MAX_EMAIL_ROWS rows; `total` is the full count for the note."""
+    total = len(rows) if total is None else total
+    rows = rows[:MAX_EMAIL_ROWS]
+    th = "".join(f'<th align="{a}" nowrap style="{_TH}">{_esc(h)}</th>' for h, a in headers)
+    aligns = [a for _, a in headers]
+    body = []
+    for i, r in enumerate(rows):
+        bg = f' bgcolor="{_C["zebra"]}"' if i % 2 else ""
+        tds = "".join(f'<td align="{a}" nowrap>{c}</td>' for a, c in zip(aligns, r))
+        body.append(f"<tr{bg}>{tds}</tr>")
+    more = ""
+    if total > len(rows):
+        more = (f'<div style="font-size:12px;color:{_C["muted"]};margin-top:4px">'
+                f'Showing top {len(rows)} of {total} — see the attached spreadsheet for all.</div>')
+    return (f'<div style="overflow-x:auto"><table cellpadding="7" cellspacing="0" width="100%" '
+            f'style="border-collapse:collapse;border:1px solid {_C["line"]};font-size:13px">'
+            f"<tr>{th}</tr>{''.join(body)}</table></div>{more}")
+
+
+def _empty(text):
+    return (f'<div style="padding:12px 14px;border:1px dashed {_C["line"]};border-radius:6px;'
+            f'color:{_C["muted"]};font-size:13px">{_esc(text)}</div>')
+
+
+def _breakout_table(full_df, symbols, side):
+    """Table of monthly breakout rows. side = 'high' | 'low'."""
+    if full_df is None or not symbols:
+        return _empty("None")
+    df = full_df[full_df["Symbol"].isin(symbols)].copy()
+    lvl, day, pct = (("Prev_Month_High", "Today_High", "%_From_Month_High") if side == "high"
+                     else ("Prev_Month_Low", "Today_Low", "%_From_Month_Low"))
+    df = df.sort_values(pct, ascending=(side == "low"))
+    held_cell = (f'<b style="color:{_C["green"] if side == "high" else _C["red"]}">'
+                 f'✔ {"Above" if side == "high" else "Below"}</b>')
+    back_cell = f'<span style="color:{_C["muted"]}">Back inside</span>'
+    rows = []
+    for _, r in df.iterrows():
+        held = (r["LTP"] > r[lvl]) if side == "high" else (r["LTP"] < r[lvl])
+        rows.append([
+            f'<b>{_esc(r["Symbol"])}</b>',
+            _num(r["LTP"]),
+            _num(r[lvl]),
+            _num(r[day]),
+            _pct(r[pct]),
+            held_cell if held else back_cell,
+        ])
+    label = "High" if side == "high" else "Low"
+    return _table(
+        [("Symbol", "left"), ("LTP", "right"), (f"Prev Month {label}", "right"),
+         (f"Today {label}", "right"), ("LTP vs Level", "right"), ("Close", "left")],
+        rows,
+    )
+
+
+def split_52w_by_fno(lows_df):
+    """Returns (fno_df, cash_only_df), each keeping the deepest-break-first order."""
+    if lows_df is None or lows_df.empty or "In_FnO" not in lows_df:
+        empty = lows_df if lows_df is not None else pd.DataFrame()
+        return empty, empty
+    is_fno = lows_df["In_FnO"] == "YES"
+    return lows_df[is_fno].reset_index(drop=True), lows_df[~is_fno].reset_index(drop=True)
+
+
+def _w52_table(lows_df, new_52w, show_lot=False):
+    yes_cell = (f'<b style="background:{_C["red_bg"]};color:{_C["red"]};padding:2px 7px;'
+                f'border-radius:3px;font-size:11px">YES</b>')
+    wick_cell = f'<span style="color:{_C["muted"]}">Wick only</span>'
+    new_b = _badge("NEW", _C["amber"], _C["amber_bg"])
+    rows = []
+    for i, (_, r) in enumerate(lows_df.head(MAX_EMAIL_ROWS).iterrows(), 1):
+        company = _esc(r.get("Company", ""))
+        row = [
+            i,
+            f'<b>{_esc(r["Symbol"])}</b>'
+            + (new_b if r["Symbol"] in new_52w else "")
+            + (_sub(company[:28]) if company else ""),
+            _num(r["LTP"]),
+            _num(r["Today_Low"]),
+            _num(r["Prev_52W_Low"]) + _sub(_esc(r["Prev_52W_Low_Date"])),
+            _pct(r["%_Low_vs_Prev_52W_Low"]),
+            _pct(r["%_LTP_From_52W_High"]),
+            yes_cell if r.get("Closed_Below_Prev_52W_Low") == "YES" else wick_cell,
+        ]
+        if show_lot:
+            lot = r.get("Lot_Size")
+            row.insert(3, _num(lot, 0) if lot is not None and pd.notna(lot) else
+                       f'<span style="color:{_C["muted"]}">—</span>')
+        rows.append(row)
+    headers = [("#", "right"), ("Symbol", "left"), ("LTP", "right"), ("Day Low", "right"),
+               ("Prev 52W Low", "right"), ("Break %", "right"), ("From 52W High", "right"),
+               ("Closed Below", "left")]
+    if show_lot:
+        headers.insert(3, ("Lot Size", "right"))
+    return _table(headers, rows, total=len(lows_df))
+
+
+def _sub_title(text, count, fg, bg):
+    return (f'<div style="margin:18px 0 6px;font-size:14px;font-weight:700;color:{_C["ink"]}">'
+            f'<b style="padding:2px 8px;border-radius:4px;background:{bg};color:{fg};'
+            f'font-size:12px">{_esc(text)}</b> '
+            f'<span style="color:{_C["muted"]};font-weight:400">({count})</span></div>')
+
+
+def build_email_html(today_str, is_first_run, current_high, current_low, new_high, new_low,
+                     full_df, lows_df, new_52w, w52_status_note):
+    show_high = current_high if is_first_run else new_high
+    show_low = current_low if is_first_run else new_low
+    prefix = "" if is_first_run else "New "
+    run_note = ("Baseline run — no previous state, showing ALL current breakouts."
+                if is_first_run else
+                "Monthly section shows only NEW breakouts since the last run.")
+
+    stats = [
+        _stat(f"{prefix}Month-High breaks", len(show_high), _C["green"], _C["green_bg"]),
+        _stat(f"{prefix}Month-Low breaks", len(show_low), _C["red"], _C["red_bg"]),
+    ]
+    fno_lows, cash_lows = split_52w_by_fno(lows_df)
+    if lows_df is not None:
+        stats.append(_stat("52W lows — F&O", len(fno_lows), _C["blue"], _C["blue_bg"]))
+        stats.append(_stat("52W lows — non-F&O", len(cash_lows), _C["amber"], _C["amber_bg"]))
+
+    parts = [
+        f'<div style="{_FONT}color:{_C["ink"]};max-width:900px;margin:0 auto">',
+        f'<div style="background:{_C["head"]};color:#fff;padding:18px 20px;border-radius:8px 8px 0 0">'
+        f'<div style="font-size:18px;font-weight:700">NSE Breakout &amp; 52-Week Low Screener</div>'
+        f'<div style="font-size:13px;opacity:.8;margin-top:2px">{_esc(today_str)}</div></div>',
+        f'<div style="border:1px solid {_C["line"]};border-top:0;border-radius:0 0 8px 8px;'
+        f'padding:16px 20px">',
+        f'<div>{"".join(stats)}</div>',
+        f'<div style="font-size:12px;color:{_C["muted"]};margin-top:6px">{_esc(run_note)}</div>',
+
+        _section_title(f"{prefix}Breakouts above previous month HIGH (F&O)", len(show_high),
+                       _C["green"]),
+        _breakout_table(full_df, show_high, "high"),
+        _section_title(f"{prefix}Breakdowns below previous month LOW (F&O)", len(show_low),
+                       _C["red"]),
+        _breakout_table(full_df, show_low, "low"),
+    ]
+
+    if lows_df is not None or w52_status_note:
+        n = 0 if lows_df is None else len(lows_df)
+        parts.append(_section_title("52-Week Lows — NIFTY 500", n, _C["amber"]))
+        if w52_status_note:
+            parts.append(_empty(w52_status_note))
+        elif n == 0:
+            parts.append(_empty("No NIFTY 500 stock made a fresh 52-week low today."))
+        else:
+            parts.append(
+                f'<div style="font-size:12px;color:{_C["muted"]};margin-bottom:6px">'
+                f'Sorted by deepest break. <b>Break %</b> = day low vs previous 52W low. '
+                f'<b>Closed Below</b> = YES means the break held at close; '
+                f'"Wick only" means it recovered above the old low. '
+                f'<b>NEW</b> = not on the list at the previous run.</div>'
+            )
+            parts.append(_sub_title("F&O stocks — futures available", len(fno_lows),
+                                    _C["blue"], _C["blue_bg"]))
+            parts.append(_w52_table(fno_lows, new_52w, show_lot=True) if len(fno_lows)
+                         else _empty("No F&O stock made a fresh 52-week low today."))
+            parts.append(_sub_title("Non-F&O stocks — cash market only", len(cash_lows),
+                                    _C["amber"], _C["amber_bg"]))
+            parts.append(_w52_table(cash_lows, new_52w) if len(cash_lows)
+                         else _empty("No non-F&O stock made a fresh 52-week low today."))
+
+    parts.append(
+        f'<div style="margin-top:24px;padding-top:12px;border-top:1px solid {_C["line"]};'
+        f'font-size:11px;color:{_C["muted"]}">Full spreadsheet (breakouts + 52W lows sheets) '
+        f'and breakout-state CSV attached. Data: Yahoo Finance EOD — cross-check with your '
+        f'broker before trading.</div>'
+    )
+    parts.append("</div></div>")
+    return "".join(parts)
 
 
 def send_email(
@@ -506,9 +834,11 @@ def send_email(
     lows_df=None,
     new_52w=frozenset(),
     w52_status_note=None,
+    full_df=None,
 ):
-    """Sends the screener result via Gmail SMTP. No-op (with a warning)
-    if the required environment variables aren't set."""
+    """Sends the screener result via Gmail SMTP as an HTML email (with a
+    plain-text fallback). No-op (with a warning) if the required
+    environment variables aren't set."""
     user = os.environ.get("EMAIL_USERNAME")
     app_password = os.environ.get("EMAIL_APP_PASSWORD")
     recipients = os.environ.get("EMAIL_TO")
@@ -557,12 +887,19 @@ def send_email(
         subject_suffix += f" | 52W Lows: {n_52w}"
     lines.append("Full spreadsheet (breakouts + 52W lows sheets) and breakout-state CSV attached.")
     body = "\n".join(lines)
+    html_body = build_email_html(
+        today_str, is_first_run, current_high, current_low, new_high, new_low,
+        full_df, lows_df, new_52w, w52_status_note,
+    )
 
-    msg = MIMEMultipart()
+    msg = MIMEMultipart("mixed")
     msg["From"] = user
     msg["To"] = recipients
     msg["Subject"] = f"NSE Monthly Breakout Screener ({subject_suffix}) — {today_str}"
-    msg.attach(MIMEText(body, "plain"))
+    alt = MIMEMultipart("alternative")  # mail apps show HTML, fall back to text
+    alt.attach(MIMEText(body, "plain", "utf-8"))
+    alt.attach(MIMEText(html_body, "html", "utf-8"))
+    msg.attach(alt)
 
     for attach_path in (excel_path, state_path):
         if attach_path and Path(attach_path).exists():
@@ -626,6 +963,12 @@ def main():
              "this many days old (default: 30)",
     )
     parser.add_argument(
+        "--fno-list-cache", default="data/fno_lot_sizes.csv",
+        help="Where NSE's official F&O stock list (with lot sizes) is kept in the repo; "
+             "refreshed on the same schedule as the NIFTY 500 list "
+             "(default: data/fno_lot_sizes.csv)",
+    )
+    parser.add_argument(
         "--w52-state-file", default="state/52w_low_state.csv",
         help="State CSV used to mark NEW 52-week lows (default: state/52w_low_state.csv)",
     )
@@ -665,7 +1008,8 @@ def main():
                 w52_note = "Scan skipped — NIFTY 500 constituent list could not be loaded."
             else:
                 print(f"\nScanning {len(n500)} NIFTY 500 symbols for fresh 52-week lows...")
-                lows_df = scan_52w_lows(n500, DEFAULT_FNO_UNIVERSE)
+                fno_lots = load_fno_lots(Path(args.fno_list_cache), args.nifty500_max_age_days)
+                lows_df = scan_52w_lows(n500, fno_lots)
                 if lows_df.empty and not {"Symbol"}.issubset(lows_df.columns):
                     lows_df = pd.DataFrame(columns=["Symbol", "Today_Low", "Prev_52W_Low",
                                                     "Session_Date"])
@@ -686,10 +1030,16 @@ def main():
     with pd.ExcelWriter(out_path) as writer:
         output_df.to_excel(writer, index=False, sheet_name="Monthly_Breakout_Screener")
         if lows_df is not None:
-            sheet = lows_df.copy()
-            if "Symbol" in sheet:
-                sheet.insert(1, "New", sheet["Symbol"].map(lambda s: "NEW" if s in new_52w else ""))
-            sheet.to_excel(writer, index=False, sheet_name="52W_Lows_NIFTY500")
+            fno_lows, cash_lows = split_52w_by_fno(lows_df)
+            for part, name in ((fno_lows, "52W_Lows_FnO"), (cash_lows, "52W_Lows_NonFnO")):
+                sheet = part.copy()
+                if "Symbol" in sheet:
+                    sheet.insert(1, "New",
+                                 sheet["Symbol"].map(lambda s: "NEW" if s in new_52w else ""))
+                    sheet = sheet.drop(columns=["In_FnO"], errors="ignore")
+                    if name == "52W_Lows_NonFnO":
+                        sheet = sheet.drop(columns=["Lot_Size"], errors="ignore")
+                sheet.to_excel(writer, index=False, sheet_name=name)
 
     print(f"\nDone. {len(output_df)} symbols in spreadsheet output.")
     print(f"  Total breaking Previous-Month High today : {len(current_high)}")
@@ -708,6 +1058,7 @@ def main():
             current_high, current_low, new_high, new_low,
             is_first_run, out_path, state_path,
             lows_df=lows_df, new_52w=new_52w, w52_status_note=w52_note,
+            full_df=full_df,
         )
 
 

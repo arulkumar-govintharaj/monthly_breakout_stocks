@@ -28,13 +28,22 @@ Rows are sorted with dual breakouts (both high and low broken) first.
 Every run also scans all **NIFTY 500** constituents and lists stocks
 that made a **fresh 52-week low** in the latest session — today's Low
 at or below the lowest Low of the previous 52 weeks. They show up in a
-separate **"52-WEEK LOW STOCKS — NIFTY 500"** section of the email and
-on a second Excel sheet, `52W_Lows_NIFTY500`, sorted deepest break first.
+separate **"52-Week Lows — NIFTY 500"** section of the email, split into
+two tables, both sorted deepest break first:
+
+1. **F&O stocks — futures available** (with lot size)
+2. **Non-F&O stocks — cash market only**
+
+The Excel file has matching sheets: `52W_Lows_FnO` and `52W_Lows_NonFnO`.
+F&O membership comes from NSE's official list (`fo_mktlots.csv`), kept in
+the repo at `data/fno_lot_sizes.csv` and refreshed on the same 30-day
+schedule as the NIFTY 500 list. If it can't be loaded, the built-in
+`DEFAULT_FNO_UNIVERSE` is used instead (without lot sizes).
 
 | Column | Meaning |
 |---|---|
 | `New` | `NEW` if the stock wasn't on the 52W-low list at the previous run |
-| `In_FnO` | `YES` if the symbol is also in the F&O universe |
+| `Lot_Size` | F&O lot size (F&O sheet only) |
 | `Today_Low` / `Prev_52W_Low` / `Prev_52W_Low_Date` | Today's low vs the prior 52-week low and when it was set |
 | `%_Low_vs_Prev_52W_Low` | How far today's low undercut the old 52W low |
 | `%_LTP_From_52W_High` | Drawdown of the close from the 52-week high |
