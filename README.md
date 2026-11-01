@@ -23,6 +23,34 @@ Runs automatically **Monday–Friday at 5:00 PM IST** via GitHub Actions.
 
 Rows are sorted with dual breakouts (both high and low broken) first.
 
+## 52-week lows (NIFTY 500)
+
+Every run also scans all **NIFTY 500** constituents and lists stocks
+that made a **fresh 52-week low** in the latest session — today's Low
+at or below the lowest Low of the previous 52 weeks. They show up in a
+separate **"52-WEEK LOW STOCKS — NIFTY 500"** section of the email and
+on a second Excel sheet, `52W_Lows_NIFTY500`, sorted deepest break first.
+
+| Column | Meaning |
+|---|---|
+| `New` | `NEW` if the stock wasn't on the 52W-low list at the previous run |
+| `In_FnO` | `YES` if the symbol is also in the F&O universe |
+| `Today_Low` / `Prev_52W_Low` / `Prev_52W_Low_Date` | Today's low vs the prior 52-week low and when it was set |
+| `%_Low_vs_Prev_52W_Low` | How far today's low undercut the old 52W low |
+| `%_LTP_From_52W_High` | Drawdown of the close from the 52-week high |
+| `Closed_Below_Prev_52W_Low` | `YES` if it also *closed* below the old low (break held) |
+
+- The constituent list lives in the repo at `data/nifty500_list.csv`,
+  with its download date in `data/nifty500_list_updated.txt`. It is
+  **not** fetched every run — only when that date is 30+ days old (or
+  the file is missing), and the workflow commits the refreshed copy
+  back. If NSE blocks the refresh, the existing list keeps being used.
+  Change the interval with `--nifty500-max-age-days`.
+- Stocks with under ~50 weeks of history (recent IPOs) and symbols that
+  didn't trade in the latest session are skipped.
+- `--no-52w-low` disables the scan; `--nifty500-file my.csv` supplies
+  your own list. A failure in this scan never blocks the breakout email.
+
 ## Quick start (local)
 
 ```bash
