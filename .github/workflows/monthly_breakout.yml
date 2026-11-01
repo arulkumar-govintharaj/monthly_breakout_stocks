@@ -15,6 +15,10 @@ on:
         description: "Skip the NIFTY 500 52-week-low scan"
         required: false
         default: "false"
+      skip_ha_reversal:
+        description: "Skip the Heikin Ashi reversal alert on 52-week-low stocks"
+        required: false
+        default: "false"
 
 permissions:
   contents: write   # needed to commit state files + NIFTY 500 cache back to the repo
@@ -50,6 +54,9 @@ jobs:
           fi
           if [ "${{ github.event.inputs.skip_52w_low }}" == "true" ]; then
             ARGS="$ARGS --no-52w-low"
+          fi
+          if [ "${{ github.event.inputs.skip_ha_reversal }}" == "true" ]; then
+            ARGS="$ARGS --no-ha-reversal"
           fi
           python monthly_breakout_screener.py $ARGS
 
