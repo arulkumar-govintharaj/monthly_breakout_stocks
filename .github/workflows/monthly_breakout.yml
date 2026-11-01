@@ -65,8 +65,10 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add state/breakout_state.csv
-          # NIFTY 500 list only changes here when it was refreshed (>30 days old)
-          for f in state/52w_low_state.csv data/nifty500_list.csv data/nifty500_list_updated.txt; do
+          # NIFTY 500 / F&O lists only change here when refreshed (>30 days old)
+          for f in state/52w_low_state.csv \
+                   data/nifty500_list.csv data/nifty500_list_updated.txt \
+                   data/fno_lot_sizes.csv data/fno_lot_sizes_updated.txt; do
             [ -f "$f" ] && git add "$f"
           done
           if git diff --cached --quiet; then
