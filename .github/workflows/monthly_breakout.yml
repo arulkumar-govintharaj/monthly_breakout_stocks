@@ -11,9 +11,13 @@ on:
         description: "Only include rows with a breakout in the spreadsheet"
         required: false
         default: "false"
+      skip_52w_low:
+        description: "Skip the NIFTY 500 52-week-low scan"
+        required: false
+        default: "false"
 
 permissions:
-  contents: write   # needed to commit state/breakout_state.csv back to the repo
+  contents: write   # needed to commit state files + NIFTY 500 cache back to the repo
 
 jobs:
   screen:
@@ -44,6 +48,9 @@ jobs:
           if [ "${{ github.event.inputs.only_breakouts }}" == "true" ]; then
             ARGS="$ARGS --only-breakouts"
           fi
+          if [ "${{ github.event.inputs.skip_52w_low }}" == "true" ]; then
+            ARGS="$ARGS --no-52w-low"
+          fi
           python monthly_breakout_screener.py $ARGS
 
       - name: Upload result as artifact
@@ -58,6 +65,10 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add state/breakout_state.csv
+          # NIFTY 500 list only changes here when it was refreshed (>30 days old)
+          for f in state/52w_low_state.csv data/nifty500_list.csv data/nifty500_list_updated.txt; do
+            [ -f "$f" ] && git add "$f"
+          done
           if git diff --cached --quiet; then
             echo "No change in breakout state — nothing to commit."
           else
