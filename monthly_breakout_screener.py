@@ -753,8 +753,39 @@ def _sub_title(text, count, fg, bg):
             f'<span style="color:{_C["muted"]};font-weight:400">({count})</span></div>')
 
 
+def _ha_section(ha_signals, watch_n, note, min_red, recent_sessions):
+    """Heikin Ashi reversal block: first doji/green HA candle after a red
+    streak, on stocks whose 52W low was made in the last N sessions."""
+    from ha_reversal_screener import _signal_table  # lazy: avoids circular import
+    n = 0 if ha_signals is None else len(ha_signals)
+    out = [_section_title("Heikin Ashi Reversals — 52-Week-Low Stocks", n, _C["green"])]
+    if note:
+        out.append(_empty(note))
+        return "".join(out)
+    out.append(
+        f'<div style="font-size:12px;color:{_C["muted"]};margin-bottom:6px">'
+        f'Watching {watch_n} NIFTY 500 stocks whose 52W low was made in the last '
+        f'{recent_sessions} sessions. Alert = first <b>DOJI</b> or <b>GREEN</b> daily HA candle '
+        f'after at least {min_red} red ones; <b>STRONG</b> = green with no lower wick. '
+        f'A heads-up to confirm next session, not an entry.</div>')
+    if n == 0:
+        out.append(_empty("No 52-week-low stock printed a doji or green HA candle after a "
+                          "red streak today."))
+        return "".join(out)
+    fno_sig, cash_sig = split_52w_by_fno(ha_signals)
+    out.append(_sub_title("F&O stocks — futures available", len(fno_sig),
+                          _C["blue"], _C["blue_bg"]))
+    out.append(_signal_table(fno_sig) if len(fno_sig) else _empty("No F&O reversal today."))
+    out.append(_sub_title("Non-F&O stocks — cash market only", len(cash_sig),
+                          _C["amber"], _C["amber_bg"]))
+    out.append(_signal_table(cash_sig) if len(cash_sig) else _empty("No non-F&O reversal today."))
+    return "".join(out)
+
+
 def build_email_html(today_str, is_first_run, current_high, current_low, new_high, new_low,
-                     full_df, lows_df, new_52w, w52_status_note):
+                     full_df, lows_df, new_52w, w52_status_note,
+                     ha_signals=None, ha_watch_n=0, ha_note=None, ha_min_red=3,
+                     ha_recent_sessions=20):
     show_high = current_high if is_first_run else new_high
     show_low = current_low if is_first_run else new_low
     prefix = "" if is_first_run else "New "
@@ -770,11 +801,14 @@ def build_email_html(today_str, is_first_run, current_high, current_low, new_hig
     if lows_df is not None:
         stats.append(_stat("52W lows — F&O", len(fno_lows), _C["blue"], _C["blue_bg"]))
         stats.append(_stat("52W lows — non-F&O", len(cash_lows), _C["amber"], _C["amber_bg"]))
+    if ha_signals is not None:
+        stats.append(_stat("HA reversals", len(ha_signals), _C["green"], _C["green_bg"]))
 
     parts = [
         f'<div style="{_FONT}color:{_C["ink"]};max-width:900px;margin:0 auto">',
         f'<div style="background:{_C["head"]};color:#fff;padding:18px 20px;border-radius:8px 8px 0 0">'
-        f'<div style="font-size:18px;font-weight:700">NSE Breakout &amp; 52-Week Low Screener</div>'
+        f'<div style="font-size:18px;font-weight:700">NSE Breakout, 52-Week Low &amp; '
+        f'HA Reversal Screener</div>'
         f'<div style="font-size:13px;opacity:.8;margin-top:2px">{_esc(today_str)}</div></div>',
         f'<div style="border:1px solid {_C["line"]};border-top:0;border-radius:0 0 8px 8px;'
         f'padding:16px 20px">',
@@ -813,9 +847,13 @@ def build_email_html(today_str, is_first_run, current_high, current_low, new_hig
             parts.append(_w52_table(cash_lows, new_52w) if len(cash_lows)
                          else _empty("No non-F&O stock made a fresh 52-week low today."))
 
+    if ha_signals is not None or ha_note:
+        parts.append(_ha_section(ha_signals, ha_watch_n, ha_note, ha_min_red, ha_recent_sessions))
+
     parts.append(
         f'<div style="margin-top:24px;padding-top:12px;border-top:1px solid {_C["line"]};'
-        f'font-size:11px;color:{_C["muted"]}">Full spreadsheet (breakouts + 52W lows sheets) '
+        f'font-size:11px;color:{_C["muted"]}">Full spreadsheet (breakouts, 52W lows and '
+        f'HA reversal sheets) '
         f'and breakout-state CSV attached. Data: Yahoo Finance EOD — cross-check with your '
         f'broker before trading.</div>'
     )
@@ -835,6 +873,11 @@ def send_email(
     new_52w=frozenset(),
     w52_status_note=None,
     full_df=None,
+    ha_signals=None,
+    ha_watch_n=0,
+    ha_note=None,
+    ha_min_red=3,
+    ha_recent_sessions=20,
 ):
     """Sends the screener result via Gmail SMTP as an HTML email (with a
     plain-text fallback). No-op (with a warning) if the required
@@ -885,11 +928,28 @@ def send_email(
         lines.append("")
         n_52w = 0 if lows_df is None else len(lows_df)
         subject_suffix += f" | 52W Lows: {n_52w}"
-    lines.append("Full spreadsheet (breakouts + 52W lows sheets) and breakout-state CSV attached.")
+    if ha_signals is not None or ha_note:
+        lines.append(f"HEIKIN ASHI REVERSALS ON 52-WEEK-LOW STOCKS "
+                     f"({0 if ha_signals is None else len(ha_signals)})")
+        if ha_note:
+            lines.append(ha_note)
+        elif ha_signals is None or ha_signals.empty:
+            lines.append("None today.")
+        else:
+            for _, r in ha_signals.iterrows():
+                lines.append(f"{r['Symbol']:<12} {'[F&O] ' if r['In_FnO'] == 'YES' else ''}"
+                             f"{r['Signal']} after {r['Red_Streak_Before']} red | Close "
+                             f"{r['Close']:,.2f} | 52W low {r['52W_Low']:,.2f} "
+                             f"({r['%_Above_52W_Low']:+.2f}%)")
+        lines.append("")
+        subject_suffix += f" | HA Reversals: {0 if ha_signals is None else len(ha_signals)}"
+    lines.append("Full spreadsheet (breakouts, 52W lows, HA reversal sheets) and "
+                 "breakout-state CSV attached.")
     body = "\n".join(lines)
     html_body = build_email_html(
         today_str, is_first_run, current_high, current_low, new_high, new_low,
         full_df, lows_df, new_52w, w52_status_note,
+        ha_signals, ha_watch_n, ha_note, ha_min_red, ha_recent_sessions,
     )
 
     msg = MIMEMultipart("mixed")
@@ -972,6 +1032,16 @@ def main():
         "--w52-state-file", default="state/52w_low_state.csv",
         help="State CSV used to mark NEW 52-week lows (default: state/52w_low_state.csv)",
     )
+    parser.add_argument(
+        "--no-ha-reversal", action="store_true",
+        help="Skip the Heikin Ashi reversal scan on 52-week-low stocks.",
+    )
+    parser.add_argument("--ha-recent-sessions", type=int, default=20,
+                        help="HA watchlist: 52W low made within this many sessions (default: 20)")
+    parser.add_argument("--ha-min-red", type=int, default=3,
+                        help="Red HA candles required before the signal candle (default: 3)")
+    parser.add_argument("--ha-doji-ratio", type=float, default=0.10,
+                        help="Max HA body/range for a doji (default: 0.10)")
     args = parser.parse_args()
 
     symbols = load_universe(args.universe, args.symbols)
@@ -1023,6 +1093,28 @@ def main():
             lows_df, new_52w = None, set()
             w52_note = f"Scan failed this run ({type(exc).__name__}) — see Actions log."
 
+    # ---- Heikin Ashi reversals on 52-week-low stocks (never blocks the email)
+    ha_watch, ha_signals, ha_note = None, None, None
+    if not args.no_ha_reversal:
+        try:
+            from ha_reversal_screener import scan as ha_scan  # lazy: avoids circular import
+            n500 = load_nifty500(Path(args.nifty500_cache), args.nifty500_file,
+                                 args.nifty500_max_age_days)
+            if n500.empty:
+                ha_note = "Scan skipped — NIFTY 500 constituent list could not be loaded."
+            else:
+                print(f"\nScanning {len(n500)} NIFTY 500 symbols for Heikin Ashi reversals...")
+                fno_lots = load_fno_lots(Path(args.fno_list_cache), args.nifty500_max_age_days)
+                ha_watch = ha_scan(n500, fno_lots, args.ha_recent_sessions,
+                                   args.ha_min_red, args.ha_doji_ratio)
+                if ha_watch.empty:
+                    ha_watch = pd.DataFrame(columns=["Symbol", "In_FnO", "Signal"])
+                ha_signals = ha_watch[ha_watch["Signal"] != ""].reset_index(drop=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[WARN] Heikin Ashi scan failed: {exc}", file=sys.stderr)
+            ha_watch, ha_signals = None, None
+            ha_note = f"Scan failed this run ({type(exc).__name__}) — see Actions log."
+
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M")
@@ -1040,6 +1132,9 @@ def main():
                     if name == "52W_Lows_NonFnO":
                         sheet = sheet.drop(columns=["Lot_Size"], errors="ignore")
                 sheet.to_excel(writer, index=False, sheet_name=name)
+        if ha_watch is not None:
+            ha_signals.to_excel(writer, index=False, sheet_name="HA_Reversal_Signals")
+            ha_watch.to_excel(writer, index=False, sheet_name="HA_Watchlist_52W_Low")
 
     print(f"\nDone. {len(output_df)} symbols in spreadsheet output.")
     print(f"  Total breaking Previous-Month High today : {len(current_high)}")
@@ -1048,6 +1143,9 @@ def main():
     print(f"  NEW Low breakouts vs last state          : {len(new_low)}")
     if lows_df is not None:
         print(f"  NIFTY 500 stocks at fresh 52-week low    : {len(lows_df)} ({len(new_52w)} new)")
+    if ha_signals is not None:
+        print(f"  HA reversals on 52W-low stocks           : {len(ha_signals)} "
+              f"(watchlist {len(ha_watch)})")
     print(f"Saved spreadsheet to: {out_path.resolve()}")
 
     # Update state file for next run (always overwrite with today's breakouts)
@@ -1059,6 +1157,9 @@ def main():
             is_first_run, out_path, state_path,
             lows_df=lows_df, new_52w=new_52w, w52_status_note=w52_note,
             full_df=full_df,
+            ha_signals=ha_signals, ha_watch_n=0 if ha_watch is None else len(ha_watch),
+            ha_note=ha_note, ha_min_red=args.ha_min_red,
+            ha_recent_sessions=args.ha_recent_sessions,
         )
 
 

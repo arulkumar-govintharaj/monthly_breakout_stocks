@@ -126,3 +126,27 @@ restricting the spreadsheet to only breakout rows.
 - "Previous month" always means the last **fully completed** calendar
   month — e.g. if today is in September, it compares against August's
   high/low, not September-to-date.
+
+## Heikin Ashi reversals (52-week-low stocks)
+
+The same run and the same email also include a **"Heikin Ashi Reversals —
+52-Week-Low Stocks"** section, split into F&O and non-F&O tables like the
+52W-low section:
+
+- **Watchlist:** NIFTY 500 stocks whose 52-week low was made within the last
+  20 sessions (`--ha-recent-sessions`).
+- **Signal:** daily candles converted to Heikin Ashi; the latest HA candle is a
+  **DOJI** (body ≤ 10% of range, `--ha-doji-ratio`), **GREEN**, or
+  **GREEN (STRONG)** (green with no lower wick), **and** the 3+ candles right
+  before it were red (`--ha-min-red`). Because the red streak must run up to
+  yesterday, each stock alerts once per turn, not every day it stays green.
+- **Excel:** `HA_Reversal_Signals` and `HA_Watchlist_52W_Low` sheets.
+- `--no-ha-reversal` (or the `skip_ha_reversal` workflow input) disables it. A
+  failure in this scan shows a note in the email and never blocks the rest.
+
+`ha_reversal_screener.py` holds the HA logic and also runs standalone:
+
+```bash
+python ha_reversal_screener.py --no-email
+python ha_reversal_screener.py --symbols SUZLON,INTELLECT --recent-sessions 60
+```
