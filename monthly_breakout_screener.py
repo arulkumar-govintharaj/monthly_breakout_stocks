@@ -705,7 +705,8 @@ def _breakout_table(full_df, symbols, side):
 
 
 HA_FNO_SIGNAL_COLS = ["Symbol", "Signal", "Lot_Size", "Close", "HA_Open", "HA_High",
-                      "HA_Low", "HA_Close", "52W_Low", "Session_Date"]
+                      "HA_Low", "HA_Close", "52W_Low", "52W_Low_Date", "Target",
+                      "Target_Date", "Session_Date"]
 
 
 def save_ha_fno_signals(ha_signals, path: Path):
@@ -959,7 +960,9 @@ def send_email(
                 lines.append(f"{r['Symbol']:<12} {'[F&O] ' if r['In_FnO'] == 'YES' else ''}"
                              f"{r['Signal']} after {r['Red_Streak_Before']} red | Close "
                              f"{r['Close']:,.2f} | 52W low {r['52W_Low']:,.2f} "
-                             f"({r['%_Above_52W_Low']:+.2f}%)")
+                             f"({r['%_Above_52W_Low']:+.2f}%)"
+                             + (f" | Target {r['Target']:,.2f} ({r['Target_Date']})"
+                                if pd.notna(r.get("Target")) else ""))
         lines.append("")
         subject_suffix += f" | HA Reversals: {0 if ha_signals is None else len(ha_signals)}"
     lines.append("Full spreadsheet (breakouts, 52W lows, HA reversal sheets) and "

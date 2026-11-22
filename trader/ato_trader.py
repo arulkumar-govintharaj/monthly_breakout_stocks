@@ -17,10 +17,15 @@ Commands (see trader/crontab.example for the schedule, all times IST):
                                     (next month; if the order can fill on the expiry
                                     day or the day before, the month after that)
   manage   every 5 min    once an entry ATO has fired and the futures position
-           09:15-15:30    exists, create the stop-loss ATO:
-                            alert : NSE:<SYM> LastTradedPrice <= signal-day HA Low
-                            order : SELL the same futures quantity, NRML, MARKET
-                          and tidy up when a position is closed (SL hit or manual).
+           09:00-15:55    has grown by the order quantity, create two exit ATOs:
+                            stop-loss : NSE:<SYM> LTP <= signal-day HA Low
+                            target    : NSE:<SYM> LTP >= last swing high before
+                                        the 52-week low (from the scan)
+                            order     : SELL the same futures quantity, NRML, MARKET
+                          When the position is closed (SL, target or by you) the
+                          other exit ATO is deleted.
+  place skips a stock if you already hold any of its futures, if the signal has
+  no target, or if the target is closer than the stop (reward < risk).
   expire   manual only    delete entry ATOs created before today that have not
                           triggered (entry ATOs otherwise stay open until they fire).
   status   any time       print the trades this script is tracking.
@@ -259,6 +264,22 @@ def net_qty(kite, tradingsymbol: str) -> int:
     return 0
 
 
+def held_futures(kite, nfo: pd.DataFrame) -> dict:
+    """{stock symbol: [futures tradingsymbols with a non-zero position]} —
+    any month, so stocks you already trade are left alone."""
+    fut_names = dict(zip(nfo.loc[nfo["instrument_type"] == "FUT", "tradingsymbol"],
+                         nfo.loc[nfo["instrument_type"] == "FUT", "name"]))
+    held = {}
+    for p in kite.positions()["net"]:
+        if p["exchange"] == "NFO" and int(p["quantity"]) != 0 and p["tradingsymbol"] in fut_names:
+            held.setdefault(fut_names[p["tradingsymbol"]], []).append(p["tradingsymbol"])
+    return held
+
+
+def fired(alert: dict) -> bool:
+    return int(alert.get("alert_count") or 0) > 0 or alert.get("status") != "enabled"
+
+
 # --------------------------------------------------------------------------
 # Email
 # --------------------------------------------------------------------------
@@ -313,11 +334,15 @@ def cmd_place(args, state: State):
     alerts = Alerts(kite, args.dry_run)
     nfo = pd.DataFrame(kite.instruments("NFO"))
     open_syms = state.open_symbols()
+    held = held_futures(kite, nfo)
     placed, skipped = [], []
     for _, r in sig.iterrows():
         sym = r["Symbol"]
         if sym in open_syms:
             skipped.append(f"{sym}: already has an open trade/ATO from this script")
+            continue
+        if sym in held:
+            skipped.append(f"{sym}: you already hold futures ({', '.join(held[sym])})")
             continue
         fut = pick_future(nfo, sym, next_weekday(today))
         if fut is None:
@@ -330,6 +355,16 @@ def cmd_place(args, state: State):
         else:
             op, level, desc = "<=", round(float(r["HA_Close"]), 2), "at/below HA Close"
         sl = round(float(r["HA_Low"]), 2)
+        target = r.get("Target")
+        if target is None or pd.isna(target):
+            skipped.append(f"{sym}: no swing-high target in the signal file")
+            continue
+        target = round(float(target), 2)
+        risk, reward = max(abs(level - sl), 0.01), target - level
+        if reward < risk:
+            skipped.append(f"{sym}: target {target} too close — reward {reward:.2f} < "
+                           f"risk {risk:.2f} (entry {level}, SL {sl})")
+            continue
         name = f"{TAG} ENTRY {sym} {session}"
         try:
             res = alerts.create_ato(name, sym, op, level, [order_item(fut_sym, "BUY", qty)])
@@ -340,14 +375,19 @@ def cmd_place(args, state: State):
             "symbol": sym, "signal": r["Signal"], "session": session,
             "future": fut_sym, "expiry": str(expiry), "qty": qty,
             "entry_op": op, "entry_level": level, "sl_level": sl,
-            "entry_uuid": res["uuid"], "sl_uuid": None, "status": "entry_open",
+            "target": target, "target_date": str(r.get("Target_Date", "")),
+            "baseline_qty": net_qty(kite, fut_sym) if not args.dry_run else 0,
+            "entry_uuid": res["uuid"], "sl_uuid": None, "tgt_uuid": None,
+            "status": "entry_open",
             "created_at": now_ist().isoformat(timespec="seconds"),
         }
         if not args.dry_run:
             state.trades.append(trade)
         placed.append(f"{sym:<12} {r['Signal']:<15} BUY {qty} {fut_sym} when LTP {op} {level} "
-                      f"({desc}) | SL after fill: LTP <= {sl} (HA Low) | "
-                      f"risk ~Rs {abs(level - sl) * qty:,.0f}")
+                      f"({desc}) | after fill: SL LTP <= {sl} (HA Low), "
+                      f"target LTP >= {target} (swing high {r.get('Target_Date', '')}) | "
+                      f"risk ~Rs {risk * qty:,.0f}, reward ~Rs {reward * qty:,.0f} "
+                      f"(1:{reward / risk:.1f})")
     if args.dry_run:
         for line in placed:
             log(f"[DRY-RUN] {line}")
@@ -361,8 +401,7 @@ def cmd_place(args, state: State):
 
 def cmd_manage(args, state: State):
     active = [t for t in state.trades
-              if t["status"] in ("entry_open", "entry_triggered", "sl_open")
-              ]
+              if t["status"] in ("entry_open", "entry_triggered", "sl_open")]
     if not active:
         return
     kite = get_kite(args.home)
@@ -371,54 +410,81 @@ def cmd_manage(args, state: State):
     for t in active:
         try:
             qty_now = net_qty(kite, t["future"])
+            base = int(t.get("baseline_qty") or 0)
             if t["status"] in ("entry_open", "entry_triggered"):
-                a = alerts.get(t["entry_uuid"])
-                fired = int(a.get("alert_count") or 0) > 0 or a.get("status") != "enabled"
-                if qty_now >= t["qty"]:
-                    res = alerts.create_ato(
-                        f"{TAG} SL {t['symbol']} {t['session']}", t["symbol"], "<=",
-                        t["sl_level"], [order_item(t["future"], "SELL", t["qty"])])
-                    t.update(sl_uuid=res["uuid"], status="sl_open",
-                             filled_at=now_ist().isoformat(timespec="seconds"))
-                    try:
-                        ltp = kite.ltp([f"NSE:{t['symbol']}"])[f"NSE:{t['symbol']}"]["last_price"]
-                    except Exception:  # noqa: BLE001
-                        ltp = None
-                    notify(f"BUY filled: {t['symbol']} — stop-loss placed",
-                           [f"Long {t['qty']} {t['future']}.",
-                            f"Stop-loss ATO: sell when {t['symbol']} LTP <= {t['sl_level']} "
-                            f"(signal-day HA Low). Stock LTP now {ltp}."]
-                           + (["WARNING: price is already below the stop — it will "
-                               "trigger immediately."]
-                              if ltp is not None and ltp <= t["sl_level"] else []))
+                entry_fired = fired(alerts.get(t["entry_uuid"]))
+                if entry_fired and qty_now >= base + t["qty"]:
+                    _place_exits(kite, alerts, t)
                     changed = True
-                elif fired and t["status"] == "entry_open":
+                elif entry_fired and t["status"] == "entry_open":
                     t["status"], t["triggered_at"] = "entry_triggered", now_ist().isoformat()
                     changed = True
                 elif t["status"] == "entry_triggered":
                     since = dt.datetime.fromisoformat(t["triggered_at"])
-                    if now_ist() - since > dt.timedelta(minutes=10):
+                    if now_ist() - since > dt.timedelta(minutes=15):
                         t["status"] = "entry_failed"
                         notify(f"Entry for {t['symbol']} triggered but no position",
-                               [f"The ATO fired but no {t['future']} position exists after "
-                                "10 minutes — the order was probably rejected (margin, "
-                                "price band). Check the Kite order book."])
+                               [f"The ATO fired but no new {t['future']} position appeared — "
+                                "the order was probably rejected (margin, price band). "
+                                "Check the Kite order book."])
                         changed = True
-            elif t["status"] == "sl_open":
-                if qty_now <= 0:
-                    a = alerts.get(t["sl_uuid"])
-                    if a.get("status") == "enabled":
-                        alerts.delete(t["sl_uuid"])   # exited manually — remove the SL
-                        how = "closed manually — stop-loss ATO deleted"
+            elif t["status"] == "sl_open" and qty_now <= base:
+                # Position closed: by the stop-loss, the target, or by you.
+                legs = {"stop-loss": t.get("sl_uuid"), "target": t.get("tgt_uuid")}
+                hit, removed = [], []
+                for leg, uuid in legs.items():
+                    if not uuid:
+                        continue
+                    a = alerts.get(uuid)
+                    if fired(a):
+                        hit.append(leg)
                     else:
-                        how = "stop-loss hit"
-                    t.update(status="closed", closed_at=now_ist().isoformat(timespec="seconds"))
-                    notify(f"{t['symbol']} position closed ({how})", [f"{t['future']}: {how}."])
-                    changed = True
+                        alerts.delete(uuid)
+                        removed.append(leg)
+                how = (f"{' and '.join(hit)} hit" if hit else "closed manually")
+                t.update(status="closed", closed_by=how,
+                         closed_at=now_ist().isoformat(timespec="seconds"))
+                notify(f"{t['symbol']} position closed ({how})",
+                       [f"{t['future']}: {how}.",
+                        f"Deleted the open {' and '.join(removed)} ATO." if removed
+                        else "No open exit ATOs left."])
+                changed = True
         except Exception as exc:  # noqa: BLE001
             log(f"[WARN] {t['symbol']}: {exc}")
     if changed:
         state.save()
+
+
+def _place_exits(kite, alerts, t):
+    """After the buy fills: stop-loss ATO (HA Low) and target ATO (swing high)."""
+    sym = t["symbol"]
+    res = alerts.create_ato(f"{TAG} SL {sym} {t['session']}", sym, "<=", t["sl_level"],
+                            [order_item(t["future"], "SELL", t["qty"])])
+    t.update(sl_uuid=res["uuid"], status="sl_open",
+             filled_at=now_ist().isoformat(timespec="seconds"))
+    lines = [f"Long {t['qty']} {t['future']}.",
+             f"Stop-loss ATO: sell when {sym} LTP <= {t['sl_level']} (signal-day HA Low)."]
+    if t.get("target"):
+        try:
+            res = alerts.create_ato(f"{TAG} TGT {sym} {t['session']}", sym, ">=",
+                                    t["target"], [order_item(t["future"], "SELL", t["qty"])])
+            t["tgt_uuid"] = res["uuid"]
+            lines.append(f"Target ATO: sell when {sym} LTP >= {t['target']} "
+                         f"(swing high {t.get('target_date', '')}).")
+        except Exception as exc:  # noqa: BLE001
+            lines.append(f"WARNING: target ATO failed ({exc}) — set a target manually.")
+    if t.get("tgt_uuid"):
+        lines.append("Whichever fires first closes the trade; the other is deleted within "
+                     "5 minutes.")
+    try:
+        ltp = kite.ltp([f"NSE:{sym}"])[f"NSE:{sym}"]["last_price"]
+        lines.append(f"Stock LTP now {ltp}.")
+        if ltp <= t["sl_level"]:
+            lines.append("WARNING: price is already below the stop — it will trigger now.")
+    except Exception:  # noqa: BLE001
+        pass
+    notify(f"BUY filled: {sym} — stop-loss" + (" and target" if t.get("tgt_uuid") else "")
+           + " placed", lines)
 
 
 def cmd_expire(args, state: State):

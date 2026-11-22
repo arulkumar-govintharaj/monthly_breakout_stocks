@@ -10,7 +10,7 @@ Reversals — 52-Week-Low Stocks* section.
 |---|---|---|
 | ~17:00 | GitHub Actions | Screener runs, emails you, commits `state/ha_fno_signals.csv` (the F&O HA signals) |
 | 17:30 | Your server | `place`: pulls the repo and creates one **entry ATO** per stock |
-| every 5 min, 09:00–15:55 | Your server | `manage`: when an entry fills, creates the **stop-loss ATO** |
+| every 5 min, 09:00–15:55 | Your server | `manage`: when an entry fills, creates the **stop-loss** and **target** ATOs; when one fires, deletes the other |
 
 **Entry ATO** — alert on the stock's NSE price, order on futures:
 - trigger: stock LTP **≤ signal-day HA Close** (`HA_ENTRY=dip`, default) or
@@ -25,11 +25,22 @@ Reversals — 52-Week-Low Stocks* section.
   entry ATO or position from this script, new signals for it are skipped.
   `trader/run.sh expire` clears untriggered entry ATOs manually.
 
-**Stop-loss ATO** — created only after the futures position exists (so it can
-never open a short):
-- trigger: stock LTP **≤ signal-day HA Low**
+**Exit ATOs** — created only after the trader's own buy has filled (so they
+can never open a short):
+- **stop-loss:** stock LTP **≤ signal-day HA Low**
+- **target:** stock LTP **≥ last swing high before the 52-week low** — the most
+  recent day whose High is above the 5 sessions on either side, within 60
+  sessions before the low (fallback: highest High of those 60 sessions).
+  Calculated by the 5 pm scan and shown in the email.
 - order: SELL the same quantity, NRML, MARKET
-- if you close the position yourself, the stop-loss ATO is deleted automatically
+- whichever fires first closes the trade; the other is deleted at the next
+  5-minute check. If you close the position yourself, both are deleted.
+
+**Skipped (listed in the 5:30 pm email):**
+- you already hold futures in that stock (any month) — your own positions are
+  never touched;
+- the target is closer than the stop-loss (reward < risk);
+- the signal has no target.
 
 Example from 20 Nov 2026 (dry run):
 

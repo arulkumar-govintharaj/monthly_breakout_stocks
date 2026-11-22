@@ -69,6 +69,32 @@ from monthly_breakout_screener import (
 # Lower wick counts as "none" if it's within this fraction of the HA range
 STRONG_WICK_TOLERANCE = 0.02
 
+# Target = last swing high before the 52W low: a High above the
+# SWING_BARS sessions on each side, searched up to TARGET_LOOKBACK
+# sessions before the low (fallback: highest High in that window).
+SWING_BARS = 5
+TARGET_LOOKBACK = 60
+
+
+def swing_high_target(df: pd.DataFrame, low_date, lookback: int = TARGET_LOOKBACK,
+                      bars: int = SWING_BARS):
+    """(target_price, target_date) — the most recent swing high before the
+    52-week low, i.e. the top the final fall into the low started from."""
+    low_pos = df.index.get_loc(low_date)
+    start = max(0, low_pos - lookback)
+    highs = df["High"].to_numpy(dtype=float)
+    for i in range(low_pos - 1, start - 1, -1):
+        lo, hi = i - bars, i + bars
+        if lo < start or hi > low_pos:
+            continue
+        if highs[i] >= highs[lo:hi + 1].max():
+            return float(highs[i]), df.index[i]
+    if low_pos == start:
+        return None, None
+    j = start + int(np.argmax(highs[start:low_pos]))
+    return float(highs[j]), df.index[j]
+
+
 # Quality filters (defaults; all overridable from the CLI)
 FILTER_DEFAULTS = {
     "min_green_body": 0.20,        # GREEN needs body >= 20% of HA range, else it's a DOJI
@@ -167,6 +193,8 @@ def analyse_stock(df: pd.DataFrame, recent_sessions: int, min_red: int,
     above_low = (close - low_52w) / low_52w * 100
     cap = max_above_low_strong if latest == "GREEN (STRONG)" else max_above_low
 
+    target, target_date = swing_high_target(df, low_date)
+
     signal, skip = "", ""
     if latest != "RED" and red_streak >= min_red:
         if streak_from_low > max_from_low:
@@ -190,6 +218,8 @@ def analyse_stock(df: pd.DataFrame, recent_sessions: int, min_red: int,
         "52W_Low_Date": pd.Timestamp(low_date).strftime("%Y-%m-%d"),
         "Sessions_Since_52W_Low": sessions_since,
         "%_Above_52W_Low": round(above_low, 2),
+        "Target": round(target, 2) if target else None,
+        "Target_Date": pd.Timestamp(target_date).strftime("%Y-%m-%d") if target else "",
         "Streak_Low": round(streak_low, 2),
         "%_Streak_Low_vs_52W_Low": round(streak_from_low, 2),
         "Skip_Reason": skip,
@@ -275,9 +305,12 @@ def _signal_table(df):
             _num(r["Close"]) + _sub(_pct(r["Day_Chg_%"])),
             _num(r["52W_Low"]) + _sub(_esc(r["52W_Low_Date"])),
             _pct(r["%_Above_52W_Low"], colour=False),
+            (_num(r["Target"]) + _sub(_esc(r.get("Target_Date", ""))))
+            if pd.notna(r.get("Target")) else "—",
         ])
     return _table([("Stock", "left"), ("HA Signal", "left"), ("Before", "right"),
-                   ("Close", "right"), ("52W Low", "right"), ("Above Low", "right")], rows)
+                   ("Close", "right"), ("52W Low", "right"), ("Above Low", "right"),
+                   ("Target", "right")], rows)
 
 
 def build_html(today_str, signals, watchlist, args):
