@@ -10,8 +10,7 @@ Reversals — 52-Week-Low Stocks* section.
 |---|---|---|
 | ~17:00 | GitHub Actions | Screener runs, emails you, commits `state/ha_fno_signals.csv` (the F&O HA signals) |
 | 17:30 | Your server | `place`: pulls the repo and creates one **entry ATO** per stock |
-| next day, every 2 min | Your server | `manage`: when an entry fills, creates the **stop-loss ATO** |
-| next day 15:35 | Your server | `expire`: deletes entry ATOs that did not trigger |
+| every 5 min, 09:00–15:55 | Your server | `manage`: when an entry fills, creates the **stop-loss ATO** |
 
 **Entry ATO** — alert on the stock's NSE price, order on futures:
 - trigger: stock LTP **≤ signal-day HA Close** (`HA_ENTRY=dip`, default) or
@@ -22,7 +21,9 @@ Reversals — 52-Week-Low Stocks* section.
   after that. Expiry 24 Nov 2026: ATOs placed Fri 20 Nov or Mon 23 Nov buy
   **January**; placed Thu 19 Nov they buy December. (Weekends are skipped;
   exchange holidays are not.)
-- valid for the next trading day only
+- stays open until it triggers (not auto-deleted). While a stock has an open
+  entry ATO or position from this script, new signals for it are skipped.
+  `trader/run.sh expire` clears untriggered entry ATOs manually.
 
 **Stop-loss ATO** — created only after the futures position exists (so it can
 never open a short):
@@ -79,6 +80,8 @@ on GitHub and the order steps run on a small server you control.
 ## Day to day
 
 - `trader/run.sh status` — trades the script is tracking.
+- Zerodha allows at most 200 ATOs per account; untriggered entries count
+  towards it, so clear old ones now and then with `expire`.
 - Logs: `~/.ha_trader/logs/YYYY-MM.log`. Emails for: ATOs placed, fills +
   stop-loss, rejections, expiries, position closed.
 - To stop trading: comment out the cron lines (and delete open `HA52` alerts

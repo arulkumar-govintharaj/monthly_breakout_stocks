@@ -16,13 +16,13 @@ Commands (see trader/crontab.example for the schedule, all times IST):
                             order : BUY 1 lot of the futures contract, NRML, MARKET
                                     (next month; if the order can fill on the expiry
                                     day or the day before, the month after that)
-  manage   every 2 min    once an entry ATO has fired and the futures position
+  manage   every 5 min    once an entry ATO has fired and the futures position
            09:15-15:30    exists, create the stop-loss ATO:
                             alert : NSE:<SYM> LastTradedPrice <= signal-day HA Low
                             order : SELL the same futures quantity, NRML, MARKET
                           and tidy up when a position is closed (SL hit or manual).
-  expire   15:35 Mon-Fri  delete entry ATOs that did not trigger during their one
-                          trading day of validity.
+  expire   manual only    delete entry ATOs created before today that have not
+                          triggered (entry ATOs otherwise stay open until they fire).
   status   any time       print the trades this script is tracking.
   login    any time       just log in (checks credentials / TOTP).
 
@@ -355,7 +355,7 @@ def cmd_place(args, state: State):
     state.data["processed_sessions"].append(session)
     state.save()
     notify(f"{len(placed)} entry ATOs placed for {session}",
-           ["Entry ATOs (valid for the next trading day):", *(placed or ["None"]), "",
+           ["Entry ATOs (open until they trigger):", *(placed or ["None"]), "",
             "Skipped:", *(skipped or ["None"])])
 
 
