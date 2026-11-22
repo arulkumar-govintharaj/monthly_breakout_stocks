@@ -17,8 +17,11 @@ Reversals — 52-Week-Low Stocks* section.
 - trigger: stock LTP **≤ signal-day HA Close** (`HA_ENTRY=dip`, default) or
   **≥ signal-day HA High** (`HA_ENTRY=breakout`)
 - order: **BUY 1 lot** (`HA_LOTS`) futures, NRML, MARKET (Zerodha adds market protection)
-- contract: **next month**; if today is within 7 days of the current month's
-  expiry, the month after that (e.g. on 23 Nov 2026 → January)
+- contract: **next month**; if the order can fill on the **last 2 trading days**
+  of the current month's contract (expiry day or the day before), the month
+  after that. Expiry 24 Nov 2026: ATOs placed Fri 20 Nov or Mon 23 Nov buy
+  **January**; placed Thu 19 Nov they buy December. (Weekends are skipped;
+  exchange holidays are not.)
 - valid for the next trading day only
 
 **Stop-loss ATO** — created only after the futures position exists (so it can

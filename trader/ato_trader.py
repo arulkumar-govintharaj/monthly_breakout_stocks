@@ -14,7 +14,8 @@ Commands (see trader/crontab.example for the schedule, all times IST):
                             alert : NSE:<SYM> LastTradedPrice <= signal-day HA Close
                                     (--entry breakout: >= signal-day HA High)
                             order : BUY 1 lot of the futures contract, NRML, MARKET
-                                    (next month; in expiry week the one after that)
+                                    (next month; if the order can fill on the expiry
+                                    day or the day before, the month after that)
   manage   every 2 min    once an entry ATO has fired and the futures position
            09:15-15:30    exists, create the stop-loss ATO:
                             alert : NSE:<SYM> LastTradedPrice <= signal-day HA Low
@@ -43,6 +44,7 @@ from email.mime.text import MIMEText
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 import requests
 
@@ -211,16 +213,27 @@ def order_item(fut, transaction_type, quantity):
 # --------------------------------------------------------------------------
 # Contract selection
 # --------------------------------------------------------------------------
-def pick_future(nfo: pd.DataFrame, symbol: str, today: dt.date, expiry_week_days: int = 7):
-    """Next-month future; if today is in the last week before the current
-    month's expiry, the contract after that (e.g. 23 Nov -> January).
+def next_weekday(d: dt.date) -> dt.date:
+    """The next trading day after d (weekends skipped; exchange holidays not)."""
+    d += dt.timedelta(days=1)
+    while d.weekday() >= 5:
+        d += dt.timedelta(days=1)
+    return d
+
+
+def pick_future(nfo: pd.DataFrame, symbol: str, trade_date: dt.date, last_days: int = 2):
+    """Next-month future for an order that can fill on trade_date. If
+    trade_date is one of the last `last_days` trading days of the current
+    month's contract (expiry day or the day before), the month after that
+    instead — e.g. trading on Mon 23 / Tue 24 Nov 2026 -> January.
     Returns (tradingsymbol, lot_size, expiry) or None."""
     futs = nfo[(nfo["name"] == symbol) & (nfo["instrument_type"] == "FUT")].copy()
     futs["expiry"] = pd.to_datetime(futs["expiry"]).dt.date
-    futs = futs[futs["expiry"] >= today].sort_values("expiry").reset_index(drop=True)
+    futs = futs[futs["expiry"] >= trade_date].sort_values("expiry").reset_index(drop=True)
     if futs.empty:
         return None
-    idx = 2 if (futs.loc[0, "expiry"] - today).days < expiry_week_days else 1
+    days_left = int(np.busday_count(trade_date, futs.loc[0, "expiry"]))  # Mon->Tue = 1
+    idx = 2 if days_left < last_days else 1
     if idx >= len(futs):
         return None
     row = futs.loc[idx]
@@ -306,7 +319,7 @@ def cmd_place(args, state: State):
         if sym in open_syms:
             skipped.append(f"{sym}: already has an open trade/ATO from this script")
             continue
-        fut = pick_future(nfo, sym, today)
+        fut = pick_future(nfo, sym, next_weekday(today))
         if fut is None:
             skipped.append(f"{sym}: no suitable futures contract found")
             continue
