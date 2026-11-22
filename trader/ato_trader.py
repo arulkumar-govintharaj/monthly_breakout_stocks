@@ -544,8 +544,34 @@ def main():
         k = get_kite(args.home)
         print("Logged in:", k.profile()["user_name"])
         return
-    {"place": cmd_place, "manage": cmd_manage, "expire": cmd_expire,
-     "status": cmd_status}[args.command](args, state)
+    try:
+        {"place": cmd_place, "manage": cmd_manage, "expire": cmd_expire,
+         "status": cmd_status}[args.command](args, state)
+    except Exception as exc:  # noqa: BLE001
+        alert_failure(args, exc)
+        raise
+
+
+def alert_failure(args, exc: Exception):
+    """Email when a scheduled run crashes (e.g. the TOTP login fails).
+    At most one email per command per day, so the 5-minute `manage` runs
+    don't flood your inbox; the log keeps every failure."""
+    if args.dry_run or args.command == "status":
+        return
+    flag = args.home / f"failed-{args.command}-{now_ist().date().isoformat()}"
+    if flag.exists():
+        return
+    flag.touch()
+    what = {"place": "no entry ATOs were placed",
+            "manage": "fills are NOT being checked and no stop-loss/target ATOs are "
+                      "being placed or cleaned up",
+            "expire": "untriggered entry ATOs were not cleared"}[args.command]
+    notify(f"{args.command} FAILED at {now_ist():%H:%M} — action needed",
+           [f"The '{args.command}' run failed, so {what}.",
+            f"Error: {type(exc).__name__}: {exc}", "",
+            "Check Kite and any open HA52 positions yourself until this is fixed.",
+            "Log: ~/.ha_trader/logs/ on the server. Test with: ato_trader.py login",
+            "(Only the first failure per command per day is emailed.)"])
 
 
 if __name__ == "__main__":
