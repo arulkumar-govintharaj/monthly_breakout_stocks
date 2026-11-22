@@ -69,6 +69,14 @@ from monthly_breakout_screener import (
 # Lower wick counts as "none" if it's within this fraction of the HA range
 STRONG_WICK_TOLERANCE = 0.02
 
+# Quality filters (defaults; all overridable from the CLI)
+FILTER_DEFAULTS = {
+    "min_green_body": 0.20,        # GREEN needs body >= 20% of HA range, else it's a DOJI
+    "max_from_low": 3.0,           # red streak (+ signal day) must get within 3% of the 52W low
+    "max_above_low": 5.0,          # close must be <= 5% above the 52W low ...
+    "max_above_low_strong": 7.0,   # ... or <= 7% for a GREEN (STRONG) candle
+}
+
 
 # --------------------------------------------------------------------------
 # Heikin Ashi
@@ -89,11 +97,16 @@ def heikin_ashi(df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def classify_candle(ha_row, doji_ratio: float) -> str:
-    """'DOJI', 'GREEN', 'GREEN (STRONG)' or 'RED' for one HA candle."""
+def classify_candle(ha_row, doji_ratio: float,
+                    min_green_body: float = FILTER_DEFAULTS["min_green_body"]) -> str:
+    """'DOJI', 'GREEN', 'GREEN (STRONG)' or 'RED' for one HA candle.
+    A green body between doji_ratio and min_green_body of the range is too
+    thin to call a reversal, so it counts as a DOJI."""
     body = ha_row["HA_Close"] - ha_row["HA_Open"]
     rng = ha_row["HA_High"] - ha_row["HA_Low"]
     if rng <= 0 or abs(body) <= doji_ratio * rng:
+        return "DOJI"
+    if 0 < body < min_green_body * rng:
         return "DOJI"
     if body > 0:
         lower_wick = min(ha_row["HA_Open"], ha_row["HA_Close"]) - ha_row["HA_Low"]
@@ -102,10 +115,22 @@ def classify_candle(ha_row, doji_ratio: float) -> str:
 
 
 def analyse_stock(df: pd.DataFrame, recent_sessions: int, min_red: int,
-                  doji_ratio: float, min_history_weeks: int = 50):
+                  doji_ratio: float, min_history_weeks: int = 50, *,
+                  min_green_body: float = FILTER_DEFAULTS["min_green_body"],
+                  max_from_low: float = FILTER_DEFAULTS["max_from_low"],
+                  max_above_low: float = FILTER_DEFAULTS["max_above_low"],
+                  max_above_low_strong: float = FILTER_DEFAULTS["max_above_low_strong"]):
     """
     One stock's daily OHLC -> dict of watchlist metrics + signal, or None
     if it isn't near its 52-week low (or lacks history).
+
+    A doji/green after the red streak only becomes a Signal if it is a turn
+    AT the low, not a pullback ending partway up a bounce:
+      * the lowest Low of the red streak + signal day is within
+        max_from_low % of the 52W low, and
+      * the close is within max_above_low % of the 52W low
+        (max_above_low_strong % for a GREEN (STRONG) candle).
+    Skip_Reason in the watchlist says why a candidate was filtered out.
     """
     if df is None or df.empty:
         return None
@@ -125,7 +150,8 @@ def analyse_stock(df: pd.DataFrame, recent_sessions: int, min_red: int,
         return None  # 52W low is too old — not a "52-week low stock" any more
 
     ha = heikin_ashi(df)  # full history so HA Open has settled
-    kinds = [classify_candle(r, doji_ratio) for _, r in ha.iloc[-(min_red + 120):].iterrows()]
+    kinds = [classify_candle(r, doji_ratio, min_green_body)
+             for _, r in ha.iloc[-(min_red + 120):].iterrows()]
     latest = kinds[-1]
     red_streak = 0
     for k in reversed(kinds[:-1]):
@@ -135,7 +161,21 @@ def analyse_stock(df: pd.DataFrame, recent_sessions: int, min_red: int,
 
     last, ha_last = df.iloc[-1], ha.iloc[-1]
     close = float(last["Close"])
-    signal = latest if latest != "RED" and red_streak >= min_red else ""
+    # Lowest real Low across the red streak and the signal candle
+    streak_low = float(df["Low"].iloc[-(red_streak + 1):].min())
+    streak_from_low = (streak_low - low_52w) / low_52w * 100
+    above_low = (close - low_52w) / low_52w * 100
+    cap = max_above_low_strong if latest == "GREEN (STRONG)" else max_above_low
+
+    signal, skip = "", ""
+    if latest != "RED" and red_streak >= min_red:
+        if streak_from_low > max_from_low:
+            skip = (f"Red streak bottomed {streak_from_low:.1f}% above 52W low "
+                    f"(max {max_from_low:g}%) — pullback in a bounce, not a turn at the low")
+        elif above_low > cap:
+            skip = f"Close {above_low:.1f}% above 52W low (max {cap:g}% for {latest})"
+        else:
+            signal = latest
     return {
         "Signal": signal,
         "HA_Candle": latest,
@@ -149,7 +189,10 @@ def analyse_stock(df: pd.DataFrame, recent_sessions: int, min_red: int,
         "52W_Low": round(low_52w, 2),
         "52W_Low_Date": pd.Timestamp(low_date).strftime("%Y-%m-%d"),
         "Sessions_Since_52W_Low": sessions_since,
-        "%_Above_52W_Low": round((close - low_52w) / low_52w * 100, 2),
+        "%_Above_52W_Low": round(above_low, 2),
+        "Streak_Low": round(streak_low, 2),
+        "%_Streak_Low_vs_52W_Low": round(streak_from_low, 2),
+        "Skip_Reason": skip,
         "Session_Date": pd.Timestamp(last_date).strftime("%Y-%m-%d"),
     }
 
@@ -158,8 +201,9 @@ def analyse_stock(df: pd.DataFrame, recent_sessions: int, min_red: int,
 # Scan
 # --------------------------------------------------------------------------
 def scan(universe: pd.DataFrame, fno: dict, recent_sessions: int, min_red: int,
-         doji_ratio: float, chunk_size: int = 100) -> pd.DataFrame:
-    """Returns the full watchlist (one row per stock near its 52W low)."""
+         doji_ratio: float, chunk_size: int = 100, **filters) -> pd.DataFrame:
+    """Returns the full watchlist (one row per stock near its 52W low).
+    **filters: any FILTER_DEFAULTS key, passed through to analyse_stock."""
     meta = universe.set_index("Symbol")
     symbols = list(meta.index)
     rows = []
@@ -176,7 +220,7 @@ def scan(universe: pd.DataFrame, fno: dict, recent_sessions: int, min_red: int,
         for sym, ticker in zip(chunk, tickers):
             try:
                 res = analyse_stock(_extract_ticker_frame(data, ticker),
-                                    recent_sessions, min_red, doji_ratio)
+                                    recent_sessions, min_red, doji_ratio, **filters)
             except Exception as exc:  # noqa: BLE001
                 print(f"  [WARN] {sym}: HA calc failed ({exc})", file=sys.stderr)
                 continue
@@ -255,7 +299,9 @@ def build_html(today_str, signals, watchlist, args):
     if len(signals):
         parts.append(
             f'<div style="font-size:12px;color:{_C["muted"]};margin-bottom:6px">'
-            f'First doji / green HA candle after at least {args.min_red} red ones. '
+            f'First doji / green HA candle after at least {args.min_red} red ones, with the '
+            f'red streak reaching within {args.max_from_low:g}% of the 52W low and the close '
+            f'within {args.max_above_low:g}% of it ({args.max_above_low_strong:g}% for STRONG). '
             f'<b>STRONG</b> = green with no lower wick. '
             f'Watchlist = 52W low made in the last {args.recent_sessions} sessions.</div>')
         parts.append(_signal_table(signals))
@@ -319,6 +365,16 @@ def main():
                    help="Red HA candles required right before the signal candle (default: 3)")
     p.add_argument("--doji-ratio", type=float, default=0.10,
                    help="Max body/range for a doji (default: 0.10)")
+    p.add_argument("--min-green-body", type=float, default=FILTER_DEFAULTS["min_green_body"],
+                   help="Min body/range for a GREEN candle; thinner = DOJI (default: 0.20)")
+    p.add_argument("--max-from-low", type=float, default=FILTER_DEFAULTS["max_from_low"],
+                   help="Red streak's lowest Low must be within this %% of the 52W low "
+                        "(default: 3)")
+    p.add_argument("--max-above-low", type=float, default=FILTER_DEFAULTS["max_above_low"],
+                   help="Max %% the close may be above the 52W low (default: 5)")
+    p.add_argument("--max-above-low-strong", type=float,
+                   default=FILTER_DEFAULTS["max_above_low_strong"],
+                   help="Same cap for GREEN (STRONG) candles (default: 7)")
     p.add_argument("--out", default="output", help="Output directory (default: ./output)")
     p.add_argument("--nifty500-cache", default="data/nifty500_list.csv")
     p.add_argument("--fno-list-cache", default="data/fno_lot_sizes.csv")
@@ -339,7 +395,10 @@ def main():
     fno = load_fno_lots(Path(args.fno_list_cache))
 
     print(f"Scanning {len(universe)} symbols for Heikin Ashi reversals near 52-week lows...")
-    watchlist = scan(universe, fno, args.recent_sessions, args.min_red, args.doji_ratio)
+    watchlist = scan(universe, fno, args.recent_sessions, args.min_red, args.doji_ratio,
+                     min_green_body=args.min_green_body, max_from_low=args.max_from_low,
+                     max_above_low=args.max_above_low,
+                     max_above_low_strong=args.max_above_low_strong)
     if watchlist.empty:
         watchlist = pd.DataFrame(columns=["Symbol", "Signal"])
     signals = watchlist[watchlist["Signal"] != ""].reset_index(drop=True)

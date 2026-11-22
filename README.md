@@ -140,7 +140,17 @@ The same run and the same email also include a **"Heikin Ashi Reversals —
   **GREEN (STRONG)** (green with no lower wick), **and** the 3+ candles right
   before it were red (`--ha-min-red`). Because the red streak must run up to
   yesterday, each stock alerts once per turn, not every day it stays green.
-- **Excel:** `HA_Reversal_Signals` and `HA_Watchlist_52W_Low` sheets.
+- **Reversal at the low only:** a candidate is alerted only when it turns *at*
+  the 52-week low, not at the end of a pullback partway up a bounce:
+  - the lowest Low of the red streak + signal day is within 3% of the 52W low
+    (`--ha-max-from-low`);
+  - the close is within 5% of the 52W low (`--ha-max-above-low`), or 7% for a
+    GREEN (STRONG) candle (`--ha-max-above-low-strong`);
+  - a GREEN needs a body of at least 20% of the HA range
+    (`--ha-min-green-body`); a thinner green counts as a DOJI.
+- **Excel:** `HA_Reversal_Signals` and `HA_Watchlist_52W_Low` sheets. The
+  watchlist sheet has `Streak_Low`, `%_Streak_Low_vs_52W_Low` and a
+  `Skip_Reason` column explaining why a doji/green candidate was not alerted.
 - `--no-ha-reversal` (or the `skip_ha_reversal` workflow input) disables it. A
   failure in this scan shows a note in the email and never blocks the rest.
 

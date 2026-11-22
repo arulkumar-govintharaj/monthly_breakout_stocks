@@ -766,7 +766,8 @@ def _ha_section(ha_signals, watch_n, note, min_red, recent_sessions):
         f'<div style="font-size:12px;color:{_C["muted"]};margin-bottom:6px">'
         f'Watching {watch_n} NIFTY 500 stocks whose 52W low was made in the last '
         f'{recent_sessions} sessions. Alert = first <b>DOJI</b> or <b>GREEN</b> daily HA candle '
-        f'after at least {min_red} red ones; <b>STRONG</b> = green with no lower wick. '
+        f'after at least {min_red} red ones, where the red streak reached the 52W low area and '
+        f'price is still close to it; <b>STRONG</b> = green with no lower wick. '
         f'A heads-up to confirm next session, not an entry.</div>')
     if n == 0:
         out.append(_empty("No 52-week-low stock printed a doji or green HA candle after a "
@@ -1042,6 +1043,14 @@ def main():
                         help="Red HA candles required before the signal candle (default: 3)")
     parser.add_argument("--ha-doji-ratio", type=float, default=0.10,
                         help="Max HA body/range for a doji (default: 0.10)")
+    parser.add_argument("--ha-min-green-body", type=float, default=0.20,
+                        help="Min HA body/range for GREEN; thinner = DOJI (default: 0.20)")
+    parser.add_argument("--ha-max-from-low", type=float, default=3.0,
+                        help="Red streak's lowest Low within this %% of the 52W low (default: 3)")
+    parser.add_argument("--ha-max-above-low", type=float, default=5.0,
+                        help="Max %% close above the 52W low (default: 5)")
+    parser.add_argument("--ha-max-above-low-strong", type=float, default=7.0,
+                        help="Max %% close above the 52W low for GREEN (STRONG) (default: 7)")
     args = parser.parse_args()
 
     symbols = load_universe(args.universe, args.symbols)
@@ -1106,7 +1115,11 @@ def main():
                 print(f"\nScanning {len(n500)} NIFTY 500 symbols for Heikin Ashi reversals...")
                 fno_lots = load_fno_lots(Path(args.fno_list_cache), args.nifty500_max_age_days)
                 ha_watch = ha_scan(n500, fno_lots, args.ha_recent_sessions,
-                                   args.ha_min_red, args.ha_doji_ratio)
+                                   args.ha_min_red, args.ha_doji_ratio,
+                                   min_green_body=args.ha_min_green_body,
+                                   max_from_low=args.ha_max_from_low,
+                                   max_above_low=args.ha_max_above_low,
+                                   max_above_low_strong=args.ha_max_above_low_strong)
                 if ha_watch.empty:
                     ha_watch = pd.DataFrame(columns=["Symbol", "In_FnO", "Signal"])
                 ha_signals = ha_watch[ha_watch["Signal"] != ""].reset_index(drop=True)
