@@ -160,3 +160,11 @@ The same run and the same email also include a **"Heikin Ashi Reversals —
 python ha_reversal_screener.py --no-email
 python ha_reversal_screener.py --symbols SUZLON,INTELLECT --recent-sessions 60
 ```
+
+## Auto-trading the F&O HA reversals (Zerodha ATO)
+
+Each run also writes `state/ha_fno_signals.csv` (the F&O rows of the HA
+reversal section). `trader/ato_trader.py`, running on your own static-IP
+server, turns those into Zerodha ATO orders at 17:30 IST and adds a stop-loss
+at the signal-day HA Low once a buy fills. Setup and details:
+[trader/README.md](trader/README.md).

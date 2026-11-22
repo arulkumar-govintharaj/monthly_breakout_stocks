@@ -704,6 +704,24 @@ def _breakout_table(full_df, symbols, side):
     )
 
 
+HA_FNO_SIGNAL_COLS = ["Symbol", "Signal", "Lot_Size", "Close", "HA_Open", "HA_High",
+                      "HA_Low", "HA_Close", "52W_Low", "Session_Date"]
+
+
+def save_ha_fno_signals(ha_signals, path: Path):
+    """F&O rows of the HA reversal section -> CSV that ato_trader.py (on the
+    static-IP server) reads at 5:30 pm to create the Zerodha ATO orders.
+    Written every run, even when empty, so a stale file is never re-used."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if ha_signals is None or ha_signals.empty or "In_FnO" not in ha_signals:
+        out = pd.DataFrame(columns=HA_FNO_SIGNAL_COLS)
+    else:
+        out = ha_signals.loc[ha_signals["In_FnO"] == "YES",
+                             [c for c in HA_FNO_SIGNAL_COLS if c in ha_signals]]
+    out.to_csv(path, index=False)
+    print(f"[INFO] {len(out)} F&O HA signals saved to {path.resolve()}")
+
+
 def split_52w_by_fno(lows_df):
     """Returns (fno_df, cash_only_df), each keeping the deepest-break-first order."""
     if lows_df is None or lows_df.empty or "In_FnO" not in lows_df:
@@ -1043,6 +1061,8 @@ def main():
                         help="Red HA candles required before the signal candle (default: 3)")
     parser.add_argument("--ha-doji-ratio", type=float, default=0.10,
                         help="Max HA body/range for a doji (default: 0.10)")
+    parser.add_argument("--ha-fno-signals-file", default="state/ha_fno_signals.csv",
+                        help="CSV of F&O HA signals for the ATO trader (default: %(default)s)")
     parser.add_argument("--ha-min-green-body", type=float, default=0.20,
                         help="Min HA body/range for GREEN; thinner = DOJI (default: 0.20)")
     parser.add_argument("--ha-max-from-low", type=float, default=3.0,
@@ -1123,6 +1143,7 @@ def main():
                 if ha_watch.empty:
                     ha_watch = pd.DataFrame(columns=["Symbol", "In_FnO", "Signal"])
                 ha_signals = ha_watch[ha_watch["Signal"] != ""].reset_index(drop=True)
+                save_ha_fno_signals(ha_signals, Path(args.ha_fno_signals_file))
         except Exception as exc:  # noqa: BLE001
             print(f"[WARN] Heikin Ashi scan failed: {exc}", file=sys.stderr)
             ha_watch, ha_signals = None, None

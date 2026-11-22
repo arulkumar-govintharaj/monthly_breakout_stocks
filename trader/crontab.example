@@ -1,0 +1,12 @@
+# Server timezone must be Asia/Kolkata:  sudo timedatectl set-timezone Asia/Kolkata
+# Install with:  crontab -e   (adjust the repo path)
+REPO=/home/ubuntu/monthly_breakout_stocks
+
+# 17:30 Mon-Fri — create entry ATOs from today's F&O HA signals (scan emails ~17:02)
+30 17 * * 1-5  $REPO/trader/run.sh place
+
+# Every 2 min, 09:15-15:30 Mon-Fri — place stop-loss after a fill, tidy closed trades
+*/2 9-15 * * 1-5  $REPO/trader/run.sh manage
+
+# 15:35 Mon-Fri — delete entry ATOs that did not trigger on their trading day
+35 15 * * 1-5  $REPO/trader/run.sh expire
