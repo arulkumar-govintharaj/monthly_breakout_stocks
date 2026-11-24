@@ -704,7 +704,7 @@ def _breakout_table(full_df, symbols, side):
     )
 
 
-HA_FNO_SIGNAL_COLS = ["Symbol", "Signal", "Lot_Size", "Close", "Day_High", "HA_Open", "HA_High",
+HA_FNO_SIGNAL_COLS = ["Symbol", "Signal", "Lot_Size", "Close", "HA_Open", "HA_High",
                       "HA_Low", "HA_Close", "52W_Low", "52W_Low_Date", "Target",
                       "Target_Date", "Session_Date"]
 

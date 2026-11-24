@@ -13,11 +13,12 @@ Reversals — 52-Week-Low Stocks* section.
 | every 5 min, 09:00–15:55 | Your server | `manage`: when an entry fills, creates the **stop-loss** and **target** ATOs; when one fires, deletes the other |
 
 **Entry ATO** — alert on the stock's NSE price, order on futures:
-- trigger: stock LTP **≥ High of the normal (non-HA) candle + 0.1%** — a
-  breakout above the reversal day confirms the turn. Reference candle:
-  **today's** if NSE has a candle for today (the 5:30 pm run, or a manual
-  rerun after 09:15), otherwise the **previous day's** (a manual rerun before
-  the open or on a holiday — i.e. the signal day's High from the 5 pm scan).
+- trigger: stock LTP **≥ previous day's close + 0.5%** (normal candle, not
+  HA). "Previous day" is the last completed daily candle: **today's close**
+  when run after 15:30 (the 5:30 pm run), otherwise the **previous session's
+  close** (manual rerun before the open, during market hours, or on a holiday).
+  The signal day's close comes from the 5 pm scan (NSE official close); a later
+  day's comes from the Kite quote.
 - if the price is already at or above the trigger, the stock is skipped
   ("not chasing") — Kite refuses alerts whose condition is already met.
 - order: **BUY 1 lot** (`HA_LOTS`) futures, NRML, MARKET (Zerodha adds market protection)
@@ -59,8 +60,8 @@ Stocks that already got an entry ATO are skipped automatically.
 Example email line (dry run with test data):
 
 ```
-NMDC  DOJI  BUY 6750 NMDC27JANFUT when LTP >= 68.5 (today's High (2026-11-24) 68.4 + 0.1%) | after fill: SL LTP <= 66.91 (HA Low), target LTP >= 82.32 (swing high 2026-09-23) | risk ~Rs 10,733, reward ~Rs 93,285 (1:8.7)
-KEI: LTP 3900.0 already >= entry trigger 3858.6 (today's High (2026-11-24) 3854.7 + 0.1%) — not chasing
+NMDC  DOJI  BUY 6750 NMDC27JANFUT when LTP >= 67.75 (close 2026-11-24 67.4 + 0.5%) | after fill: SL LTP <= 66.91 (HA Low), target LTP >= 82.32 (swing high 2026-09-23) | risk ~Rs 5,670, reward ~Rs 98,347 (1:17.3)
+KEI: LTP 3900.0 already >= entry trigger 3819.65 (close 2026-11-24 3800.6 + 0.5%) — not chasing
 ```
 
 There is **no position cap**: every F&O signal gets an ATO. If margin runs

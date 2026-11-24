@@ -11,10 +11,10 @@ Commands (see trader/crontab.example for the schedule, all times IST):
 
   place    17:30 Mon-Fri  git pull, read today's F&O HA signals and create one
                           entry ATO per stock:
-                            alert : NSE:<SYM> LastTradedPrice >= reference-candle
-                                    High + 0.1% (the normal candle, not HA):
-                                    today's candle if NSE has one for today,
-                                    otherwise the previous day's (signal-day) High
+                            alert : NSE:<SYM> LastTradedPrice >= previous day's
+                                    close + 0.5% (normal candle, not HA). "Previous
+                                    day" = last completed daily candle: today's
+                                    close after 15:30, else the prior session's
                             order : BUY 1 lot of the futures contract, NRML, MARKET
                                     (next month; if the order can fill on the expiry
                                     day or the day before, the month after that)
@@ -62,7 +62,7 @@ import requests
 IST = ZoneInfo("Asia/Kolkata")
 API = "https://api.kite.trade"
 TAG = "HA52"                      # prefix on every alert this script creates
-ENTRY_BUFFER = 0.001              # entry trigger = reference candle High + 0.1%
+ENTRY_BUFFER = 0.005              # entry trigger = previous day close + 0.5%
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
@@ -292,34 +292,44 @@ def round_up(x: float, step: float = 0.05) -> float:
 
 
 def entry_trigger(kite, sym: str, sig_row, session: str):
-    """Entry level = High of the normal (non-HA) reference candle + ENTRY_BUFFER.
+    """Entry level = close of the last completed normal (non-HA) daily candle
+    + ENTRY_BUFFER, i.e. "previous day's close" for the next trading session.
 
-    Reference candle: today's candle if NSE has traded the stock today (the
-    5:30 pm run, or a manual rerun after 09:15); otherwise the previous day's
-    candle (a manual rerun before the market opens, or on a holiday), which is
-    the signal day's High from the 5 pm scan.
-    Returns (trigger, ref_high, ref_desc, ltp); ltp is None if no quote access."""
-    today = now_ist().date()
+    Last completed candle:
+      * after 15:30 on a trading day (the 5:30 pm run) -> today's close
+      * during market hours                           -> previous session's close
+      * before the open / on a holiday                -> last trading day's close
+    The signal file's Close (NSE official close from the 5 pm scan) is used when
+    that day is the signal day; otherwise the Kite quote: ohlc.close during market
+    hours (the previous close), or the last traded price after the close.
+    Returns (trigger, ref_close, ref_desc, ltp); ltp is None if no quote access."""
+    now = now_ist()
+    today = now.date()
     q = None
     try:
         q = kite.quote([f"NSE:{sym}"])[f"NSE:{sym}"]
     except Exception as exc:  # noqa: BLE001
-        log(f"[WARN] {sym}: quote unavailable ({exc}); using the signal-day High")
+        log(f"[WARN] {sym}: quote unavailable ({exc}); using the signal-day Close")
     ltp = float(q["last_price"]) if q and q.get("last_price") else None
     ltt = (q.get("last_trade_time") or q.get("timestamp")) if q else None
-    day_high = sig_row.get("Day_High")
-    if q and ltt and pd.Timestamp(ltt).date() == today and (q.get("ohlc") or {}).get("high"):
-        ref_high, ref_desc = float(q["ohlc"]["high"]), f"today's High ({today})"
-    elif day_high is not None and not pd.isna(day_high):
-        ref_high, ref_desc = float(day_high), f"previous day's High ({session})"
-    elif q and (q.get("ohlc") or {}).get("high"):
-        # signal file from before the Day_High column existed
-        last_day = pd.Timestamp(ltt).date() if ltt else "last session"
-        ref_high, ref_desc = float(q["ohlc"]["high"]), f"previous day's High ({last_day})"
+    ltt_day = pd.Timestamp(ltt).date() if ltt else None
+    file_close = sig_row.get("Close")
+    file_close = None if file_close is None or pd.isna(file_close) else float(file_close)
+
+    if ltt_day == today and now.time() < dt.time(15, 30):
+        prev = (q.get("ohlc") or {}).get("close")
+        if not prev:
+            raise RuntimeError("Kite quote has no previous close")
+        ref_close, ref_desc = float(prev), "prev session close"
+    elif ltt_day is None or ltt_day.isoformat() == session:
+        if file_close is None:
+            raise RuntimeError("no Close in the signal file and no quote access")
+        ref_close, ref_desc = file_close, f"close {session}"
     else:
-        raise RuntimeError("no normal-candle High available (no Day_High in the signal "
-                           "file and no quote access)")
-    return round_up(ref_high * (1 + ENTRY_BUFFER)), round(ref_high, 2), ref_desc, ltp
+        if ltp is None:
+            raise RuntimeError("Kite quote has no last price")
+        ref_close, ref_desc = ltp, f"close {ltt_day} (last traded price)"
+    return round_up(ref_close * (1 + ENTRY_BUFFER)), round(ref_close, 2), ref_desc, ltp
 
 
 # --------------------------------------------------------------------------
@@ -395,11 +405,11 @@ def cmd_place(args, state: State):
         fut_sym, lot, expiry = fut
         qty = lot * args.lots
         try:
-            level, ref_high, ref_desc, ltp = entry_trigger(kite, sym, r, session)
+            level, ref_close, ref_desc, ltp = entry_trigger(kite, sym, r, session)
         except Exception as exc:  # noqa: BLE001
             skipped.append(f"{sym}: could not work out the entry trigger — {exc}")
             continue
-        op, desc = ">=", f"{ref_desc} {ref_high} + 0.1%"
+        op, desc = ">=", f"{ref_desc} {ref_close} + 0.5%"
         if ltp is not None and ltp >= level:
             skipped.append(f"{sym}: LTP {ltp} already >= entry trigger {level} ({desc}) "
                            "— not chasing")
@@ -590,7 +600,7 @@ def main():
     p.add_argument("--no-pull", action="store_true", help="Don't git pull before placing")
     args = p.parse_args()
     if os.environ.get("HA_ENTRY"):
-        log("[INFO] HA_ENTRY is no longer used (entry is always LTP >= candle High + 0.1%); "
+        log("[INFO] HA_ENTRY is no longer used (entry is always LTP >= prev day close + 0.5%); "
             "remove it from ~/.ha_trader/.env")
     state = State(args.home)
     if args.command == "login":
