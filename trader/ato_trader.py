@@ -26,6 +26,7 @@ Commands (see trader/crontab.example for the schedule, all times IST):
                             order     : SELL the same futures quantity, NRML, MARKET
                           When the position is closed (SL, target or by you) the
                           other exit ATO is deleted.
+  place --dry-run creates nothing but still emails the preview ([DRY RUN] subject).
   place skips a stock if you already hold any of its futures, if the signal has
   no target, if the target is closer than the stop (reward < risk), or if the
   price is already at/above the entry trigger (Kite rejects such alerts).
@@ -338,7 +339,7 @@ def entry_trigger(kite, sym: str, sig_row, session: str):
 # --------------------------------------------------------------------------
 # Email
 # --------------------------------------------------------------------------
-def notify(subject: str, lines, html_body: str = ""):
+def notify(subject: str, lines, html_body: str = "", dry_run: bool = False):
     """Plain-text email; with html_body, a multipart email (HTML + text fallback)."""
     user, pwd, to = (os.environ.get(k, "") for k in
                      ("EMAIL_USERNAME", "EMAIL_APP_PASSWORD", "EMAIL_TO"))
@@ -352,7 +353,8 @@ def notify(subject: str, lines, html_body: str = ""):
         msg.attach(MIMEText(html_body, "html", "utf-8"))
     else:
         msg = MIMEText(body, "plain", "utf-8")
-    msg["From"], msg["To"], msg["Subject"] = user, to, f"[HA52 ATO] {subject}"
+    msg["From"], msg["To"], msg["Subject"] = (user, to, ("[DRY RUN] " if dry_run else "")
+                                            + f"[HA52 ATO] {subject}")
     try:
         with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as s:
             s.starttls()
@@ -374,7 +376,7 @@ _TD = "padding:9px 10px;"
 _NOTE = "font-size:11px;color:#6b7280;"
 
 
-def place_email_html(session: str, placed_rows, skipped) -> str:
+def place_email_html(session: str, placed_rows, skipped, dry_run: bool = False) -> str:
     """Colour-coded HTML for the 5:30 pm entry email (inline CSS for Gmail)."""
     e = html.escape
 
@@ -394,11 +396,14 @@ def place_email_html(session: str, placed_rows, skipped) -> str:
         '<div style="background:#1e3a8a;color:#ffffff;padding:16px 20px;">'
         f'<div style="font-size:20px;font-weight:600;">HA52 ATO — Entry orders for '
         f'{e(session)} signals</div><div style="font-size:13px;opacity:.85;margin-top:4px;">'
-        f'Placed {now_ist():%a %d %b %Y, %H:%M} IST · Heikin Ashi reversals at 52-week lows'
-        '</div></div>',
+        f'{"Previewed" if dry_run else "Placed"} {now_ist():%a %d %b %Y, %H:%M} IST · '
+        'Heikin Ashi reversals at 52-week lows</div></div>',
+        ('<div style="background:#fef9c3;color:#854d0e;padding:10px 20px;font-size:14px;'
+         'font-weight:600;border-bottom:1px solid #fde68a;">🧪 DRY RUN — preview only, '
+         'nothing was placed in Kite</div>') if dry_run else "",
         '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" '
         'style="border-collapse:collapse;"><tr>'
-        + tile("Placed", len(placed_rows), "#ecfdf5", "#047857", "#065f46")
+        + tile("Would place" if dry_run else "Placed", len(placed_rows), "#ecfdf5", "#047857", "#065f46")
         + tile("Skipped", len(skipped), "#fff7ed", "#c2410c", "#9a3412")
         + '</tr></table>',
         '<div style="padding:18px 20px 6px;font-size:16px;font-weight:600;color:#065f46;">'
@@ -500,7 +505,7 @@ def cmd_place(args, state: State):
     placed, placed_rows, skipped = [], [], []
     for _, r in sig.iterrows():
         sym = r["Symbol"]
-        if sym in open_syms:
+        if sym in open_syms and not args.dry_run:  # dry run previews every signal
             skipped.append(f"{sym}: already has an open trade/ATO from this script")
             continue
         if sym in held:
@@ -570,6 +575,11 @@ def cmd_place(args, state: State):
     if args.dry_run:
         for line in placed:
             log(f"[DRY-RUN] {line}")
+        notify(f"{len(placed)} entry ATOs would be placed for {session}",
+               ["DRY RUN — nothing was placed.", "",
+                "Entry ATOs:", *(placed or ["None"]), "", "Skipped:", *(skipped or ["None"])],
+               html_body=place_email_html(session, placed_rows, skipped, dry_run=True),
+               dry_run=True)
         return
     state.data["processed_sessions"].append(session)
     state.save()
