@@ -44,13 +44,16 @@ because the HA candles are built from it; orders go to the futures contract.
 
 import argparse
 import datetime as dt
+import html
 import json
 import math
 import os
+import re
 import smtplib
 import subprocess
 import sys
 import urllib.parse
+from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -335,14 +338,20 @@ def entry_trigger(kite, sym: str, sig_row, session: str):
 # --------------------------------------------------------------------------
 # Email
 # --------------------------------------------------------------------------
-def notify(subject: str, lines):
+def notify(subject: str, lines, html_body: str = ""):
+    """Plain-text email; with html_body, a multipart email (HTML + text fallback)."""
     user, pwd, to = (os.environ.get(k, "") for k in
                      ("EMAIL_USERNAME", "EMAIL_APP_PASSWORD", "EMAIL_TO"))
     body = "\n".join(lines)
     log(f"[NOTIFY] {subject}\n{body}")
     if not (user and pwd and to):
         return
-    msg = MIMEText(body, "plain", "utf-8")
+    if html_body:
+        msg = MIMEMultipart("alternative")
+        msg.attach(MIMEText(body, "plain", "utf-8"))
+        msg.attach(MIMEText(html_body, "html", "utf-8"))
+    else:
+        msg = MIMEText(body, "plain", "utf-8")
     msg["From"], msg["To"], msg["Subject"] = user, to, f"[HA52 ATO] {subject}"
     try:
         with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as s:
@@ -351,6 +360,107 @@ def notify(subject: str, lines):
             s.sendmail(user, [r.strip() for r in to.split(",")], msg.as_string())
     except Exception as exc:  # noqa: BLE001
         log(f"[WARN] email failed: {exc}")
+
+
+def _short_dates(text: str) -> str:
+    """2026-11-23 -> 23-Nov (for the compact notes in the email table)."""
+    return re.sub(r"\b(\d{4})-(\d{2})-(\d{2})\b",
+                  lambda m: dt.date(int(m[1]), int(m[2]), int(m[3])).strftime("%d-%b"), text)
+
+
+_SIGNAL_BADGE = {"DOJI": ("#fef3c7", "#92400e"), "GREEN": ("#dcfce7", "#166534"),
+                 "GREEN (STRONG)": ("#bbf7d0", "#14532d")}
+_TD = "padding:9px 10px;"
+_NOTE = "font-size:11px;color:#6b7280;"
+
+
+def place_email_html(session: str, placed_rows, skipped) -> str:
+    """Colour-coded HTML for the 5:30 pm entry email (inline CSS for Gmail)."""
+    e = html.escape
+
+    def tile(label, n, bg, fg, dark):
+        return (f'<td style="padding:14px 20px;background:{bg};width:50%;">'
+                f'<div style="font-size:12px;color:{fg};text-transform:uppercase;'
+                f'letter-spacing:.5px;">{label}</div>'
+                f'<div style="font-size:24px;font-weight:700;color:{dark};">{n}</div></td>')
+
+    def price(v):
+        return f"{v:,.2f}"
+
+    out = [
+        '<div style="margin:0;padding:16px;background:#f3f5f9;font-family:Segoe UI,Arial,'
+        'sans-serif;color:#1f2937;"><div style="max-width:960px;margin:0 auto;'
+        'background:#ffffff;border-radius:8px;overflow:hidden;border:1px solid #e5e7eb;">',
+        '<div style="background:#1e3a8a;color:#ffffff;padding:16px 20px;">'
+        f'<div style="font-size:20px;font-weight:600;">HA52 ATO — Entry orders for '
+        f'{e(session)} signals</div><div style="font-size:13px;opacity:.85;margin-top:4px;">'
+        f'Placed {now_ist():%a %d %b %Y, %H:%M} IST · Heikin Ashi reversals at 52-week lows'
+        '</div></div>',
+        '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" '
+        'style="border-collapse:collapse;"><tr>'
+        + tile("Placed", len(placed_rows), "#ecfdf5", "#047857", "#065f46")
+        + tile("Skipped", len(skipped), "#fff7ed", "#c2410c", "#9a3412")
+        + '</tr></table>',
+        '<div style="padding:18px 20px 6px;font-size:16px;font-weight:600;color:#065f46;">'
+        '✅ Entry ATOs — open until they trigger</div>'
+        '<div style="padding:0 20px 18px;overflow-x:auto;">',
+    ]
+    if placed_rows:
+        heads = [("Stock", "left"), ("Signal", "left"), ("Buy", "left"),
+                 ("Entry (LTP ≥)", "right"), ("Stop-loss (LTP ≤)", "right"),
+                 ("Target (LTP ≥)", "right"), ("Risk ₹", "right"), ("Reward ₹", "right"),
+                 ("R:R", "center")]
+        out.append('<table cellspacing="0" cellpadding="0" style="border-collapse:collapse;'
+                   'width:100%;font-size:13px;"><tr style="background:#1e3a8a;color:#ffffff;">'
+                   + "".join(f'<th style="{_TD}text-align:{a};">{h}</th>' for h, a in heads)
+                   + "</tr>")
+        for i, r in enumerate(placed_rows):
+            bg, fg = _SIGNAL_BADGE.get(r["signal"], ("#e5e7eb", "#374151"))
+            rr_bg, rr_fg = (("#d1fae5", "#065f46") if r["rr"] >= 2 else ("#fef3c7", "#92400e"))
+            out.append(
+                f'<tr style="background:{"#ffffff" if i % 2 == 0 else "#f9fafb"};'
+                'border-bottom:1px solid #e5e7eb;">'
+                f'<td style="{_TD}font-weight:700;">{e(r["symbol"])}</td>'
+                f'<td style="{_TD}"><span style="background:{bg};color:{fg};padding:2px 8px;'
+                f'border-radius:10px;font-size:12px;font-weight:600;">{e(r["signal"])}</span></td>'
+                f'<td style="{_TD}">{r["qty"]:,} × {e(r["future"])}</td>'
+                f'<td style="{_TD}text-align:right;"><b style="color:#1d4ed8;">{price(r["entry"])}'
+                f'</b><div style="{_NOTE}">{e(_short_dates(r["entry_note"]))}</div></td>'
+                f'<td style="{_TD}text-align:right;"><b style="color:#b91c1c;">{price(r["sl"])}'
+                f'</b><div style="{_NOTE}">HA Low</div></td>'
+                f'<td style="{_TD}text-align:right;"><b style="color:#047857;">'
+                f'{price(r["target"])}</b><div style="{_NOTE}">swing high '
+                f'{e(_short_dates(r["target_date"]))}</div></td>'
+                f'<td style="{_TD}text-align:right;color:#b91c1c;">{r["risk"]:,.0f}</td>'
+                f'<td style="{_TD}text-align:right;color:#047857;">{r["reward"]:,.0f}</td>'
+                f'<td style="{_TD}text-align:center;"><span style="background:{rr_bg};'
+                f'color:{rr_fg};padding:2px 8px;border-radius:10px;font-weight:700;">'
+                f'1 : {r["rr"]:.1f}</span></td></tr>')
+        out.append("</table>")
+    else:
+        out.append('<div style="font-size:13px;color:#6b7280;">None</div>')
+    out.append("</div>")
+
+    out.append('<div style="padding:6px 20px 6px;font-size:16px;font-weight:600;'
+               'color:#9a3412;">⚠️ Skipped</div><div style="padding:0 20px 18px;">')
+    if skipped:
+        out.append('<table cellspacing="0" cellpadding="0" style="border-collapse:collapse;'
+                   'width:100%;font-size:13px;"><tr style="background:#fed7aa;color:#7c2d12;">'
+                   f'<th style="padding:8px 10px;text-align:left;width:140px;">Stock</th>'
+                   f'<th style="padding:8px 10px;text-align:left;">Reason</th></tr>')
+        for line in skipped:
+            sym, _, reason = line.partition(": ")
+            out.append('<tr style="background:#fff7ed;border-bottom:1px solid #fde3c8;">'
+                       f'<td style="padding:8px 10px;font-weight:700;">{e(sym)}</td>'
+                       f'<td style="padding:8px 10px;">{e(_short_dates(reason))}</td></tr>')
+        out.append("</table>")
+    else:
+        out.append('<div style="font-size:13px;color:#6b7280;">None</div>')
+    out.append('</div><div style="padding:12px 20px;background:#f9fafb;border-top:1px solid '
+               '#e5e7eb;font-size:12px;color:#6b7280;">Orders: BUY futures, NRML, MARKET. '
+               'After a fill, stop-loss and target ATOs are created automatically; whichever '
+               'fires first closes the trade.</div></div></div>')
+    return "".join(out)
 
 
 # --------------------------------------------------------------------------
@@ -387,7 +497,7 @@ def cmd_place(args, state: State):
     nfo = pd.DataFrame(kite.instruments("NFO"))
     open_syms = state.open_symbols()
     held = held_futures(kite, nfo)
-    placed, skipped = [], []
+    placed, placed_rows, skipped = [], [], []
     for _, r in sig.iterrows():
         sym = r["Symbol"]
         if sym in open_syms:
@@ -447,6 +557,11 @@ def cmd_place(args, state: State):
         }
         if not args.dry_run:
             state.trades.append(trade)
+        placed_rows.append({
+            "symbol": sym, "signal": str(r["Signal"]), "qty": qty, "future": fut_sym,
+            "entry": level, "entry_note": desc, "sl": sl, "target": target,
+            "target_date": str(r.get("Target_Date", "")), "risk": risk * qty,
+            "reward": reward * qty, "rr": reward / risk})
         placed.append(f"{sym:<12} {r['Signal']:<15} BUY {qty} {fut_sym} when LTP {op} {level} "
                       f"({desc}) | after fill: SL LTP <= {sl} (HA Low), "
                       f"target LTP >= {target} (swing high {r.get('Target_Date', '')}) | "
@@ -460,7 +575,8 @@ def cmd_place(args, state: State):
     state.save()
     notify(f"{len(placed)} entry ATOs placed for {session}",
            ["Entry ATOs (open until they trigger):", *(placed or ["None"]), "",
-            "Skipped:", *(skipped or ["None"])])
+            "Skipped:", *(skipped or ["None"])],
+           html_body=place_email_html(session, placed_rows, skipped))
 
 
 def cmd_manage(args, state: State):
