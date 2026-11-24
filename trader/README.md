@@ -13,8 +13,13 @@ Reversals — 52-Week-Low Stocks* section.
 | every 5 min, 09:00–15:55 | Your server | `manage`: when an entry fills, creates the **stop-loss** and **target** ATOs; when one fires, deletes the other |
 
 **Entry ATO** — alert on the stock's NSE price, order on futures:
-- trigger: stock LTP **≤ signal-day HA Close** (`HA_ENTRY=dip`, default) or
-  **≥ signal-day HA High** (`HA_ENTRY=breakout`)
+- trigger: stock LTP **≥ High of the normal (non-HA) candle + 0.1%** — a
+  breakout above the reversal day confirms the turn. Reference candle:
+  **today's** if NSE has a candle for today (the 5:30 pm run, or a manual
+  rerun after 09:15), otherwise the **previous day's** (a manual rerun before
+  the open or on a holiday — i.e. the signal day's High from the 5 pm scan).
+- if the price is already at or above the trigger, the stock is skipped
+  ("not chasing") — Kite refuses alerts whose condition is already met.
 - order: **BUY 1 lot** (`HA_LOTS`) futures, NRML, MARKET (Zerodha adds market protection)
 - contract: **next month**; if the order can fill on the **last 2 trading days**
   of the current month's contract (expiry day or the day before), the month
@@ -40,14 +45,22 @@ can never open a short):
 - you already hold futures in that stock (any month) — your own positions are
   never touched;
 - the target is closer than the stop-loss (reward < risk);
-- the signal has no target.
+- the signal has no target;
+- the price is already at/above the entry trigger.
 
-Example from 20 Nov 2026 (dry run):
+**Rerunning manually the next morning** (e.g. after a failed 5:30 pm run):
+
+```bash
+trader/run.sh place --session 2026-11-23 --force    # the signal date
+```
+
+Stocks that already got an entry ATO are skipped automatically.
+
+Example email line (dry run with test data):
 
 ```
-TMPV        GREEN (STRONG)  BUY 1600 TMPV27JANFUT when LTP <= 264.46 | SL: LTP <= 260.74 | risk ~Rs 5,952
-ASTRAL      DOJI            BUY 425 ASTRAL27JANFUT when LTP <= 1247.42 | SL: LTP <= 1236.5 | risk ~Rs 4,641
-SUPREMEIND  DOJI            BUY 175 SUPREMEIND27JANFUT when LTP <= 3207.88 | SL: LTP <= 3182.1 | risk ~Rs 4,512
+NMDC  DOJI  BUY 6750 NMDC27JANFUT when LTP >= 68.5 (today's High (2026-11-24) 68.4 + 0.1%) | after fill: SL LTP <= 66.91 (HA Low), target LTP >= 82.32 (swing high 2026-09-23) | risk ~Rs 10,733, reward ~Rs 93,285 (1:8.7)
+KEI: LTP 3900.0 already >= entry trigger 3858.6 (today's High (2026-11-24) 3854.7 + 0.1%) — not chasing
 ```
 
 There is **no position cap**: every F&O signal gets an ATO. If margin runs
